@@ -1,0 +1,7 @@
+aiogram>=3.4,<4
+SQLAlchemy[asyncio]>=2.0
+aiosqlite
+python-dotenv
+httpx
+beautifulsoup4
+lxml

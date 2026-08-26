@@ -1,0 +1,200 @@
+"""SQLAlchemy ORM-модели для MVP.
+
+Схема соответствует Этапу 1 (архитектура):
+    users, profiles, profile_districts, listings, favorites
+
+listings и favorites уже описаны здесь, чтобы не переделывать схему на
+Этапе 3-4 — но заполняться они начнут только когда появится парсер (sources/)
+и сервис matching (services/).
+"""
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+# --------------------------------------------------------------------------
+# Enums
+# --------------------------------------------------------------------------
+
+class Gender(str, enum.Enum):
+    MALE = "male"
+    FEMALE = "female"
+
+
+class RoommateGender(str, enum.Enum):
+    FEMALE = "female"
+    MALE = "male"
+    COUPLE = "couple"
+    ANY = "any"
+
+
+class HousingType(str, enum.Enum):
+    ROOM = "room"          # комната
+    SUBLET = "sublet"      # подселение
+    ANY = "any"            # неважно
+
+
+class District(str, enum.Enum):
+    ANY = "any"
+    CENTRALNY = "central"
+    FRUNZENSKY = "frunzensky"
+    MOSKOVSKY = "moskovsky"
+    OKTYABRSKY = "oktyabrsky"
+    LENINSKY = "leninsky"
+    ZAVODSKOY = "zavodskoy"
+    PERVOMAYSKY = "pervomaysky"
+    SOVETSKY = "sovetsky"
+    PARTIZANSKY = "partizansky"
+
+
+DISTRICT_LABELS: dict[District, str] = {
+    District.ANY: "Любой район",
+    District.CENTRALNY: "Центральный",
+    District.FRUNZENSKY: "Фрунзенский",
+    District.MOSKOVSKY: "Московский",
+    District.OKTYABRSKY: "Октябрьский",
+    District.LENINSKY: "Ленинский",
+    District.ZAVODSKOY: "Заводской",
+    District.PERVOMAYSKY: "Первомайский",
+    District.SOVETSKY: "Советский",
+    District.PARTIZANSKY: "Партизанский",
+}
+
+
+# --------------------------------------------------------------------------
+# Таблицы
+# --------------------------------------------------------------------------
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    profile: Mapped["Profile | None"] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    favorites: Mapped[list["Favorite"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+
+    gender: Mapped[Gender] = mapped_column(Enum(Gender))
+    age: Mapped[int] = mapped_column(Integer)
+    max_budget: Mapped[int] = mapped_column(Integer)
+    housing_type: Mapped[HousingType] = mapped_column(Enum(HousingType))
+    preferred_roommate_gender: Mapped[RoommateGender] = mapped_column(Enum(RoommateGender))
+
+    pets: Mapped[bool] = mapped_column(Boolean, default=False)
+    smoking: Mapped[bool] = mapped_column(Boolean, default=False)
+    bad_habits: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    occupation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="profile")
+    districts: Mapped[list["ProfileDistrict"]] = relationship(
+        back_populates="profile", cascade="all, delete-orphan"
+    )
+
+
+class ProfileDistrict(Base):
+    """Многие-ко-многим: одна анкета — несколько районов."""
+
+    __tablename__ = "profile_districts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
+    district: Mapped[District] = mapped_column(Enum(District))
+
+    profile: Mapped["Profile"] = relationship(back_populates="districts")
+
+    __table_args__ = (UniqueConstraint("profile_id", "district"),)
+
+
+class Listing(Base):
+    """Заполняется парсером на Этапе 3. Модель нужна уже сейчас, чтобы
+    не переделывать миграции позже."""
+
+    __tablename__ = "listings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(32))
+
+    title: Mapped[str] = mapped_column(String(512))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = "Договорная"
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+
+    city: Mapped[str] = mapped_column(String(64), default="Минск")
+    district: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    housing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    owner_gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    roommates_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    suitable_gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    url: Mapped[str] = mapped_column(String(512))
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (UniqueConstraint("external_id", "source"),)
+
+
+class Favorite(Base):
+    __tablename__ = "favorites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="favorites")
+    listing: Mapped["Listing"] = relationship()
+
+    __table_args__ = (UniqueConstraint("user_id", "listing_id"),)
