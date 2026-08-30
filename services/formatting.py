@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from database.models import DISTRICT_LABELS, District, Listing
 from services.matching import price_to_usd
+from utils.helpers import utcnow
 
 
 def _district_label(district_value: str | None) -> str | None:
@@ -11,6 +12,24 @@ def _district_label(district_value: str | None) -> str | None:
         return DISTRICT_LABELS[District(district_value)]
     except ValueError:
         return district_value  # не должно происходить, см. sources/kufar.py
+
+
+def _freshness_label(parsed_at) -> str:
+    """Честная формулировка: это МЫ впервые увидели объявление в это время,
+    не обязательно момент публикации на Kufar (его достоверно вытащить не
+    удалось — см. README). Для объявлений, которые регулярно подтягиваются
+    поиском/уведомлениями, это всё равно неплохой прокси свежести."""
+    delta = utcnow() - parsed_at
+    if delta.days == 0:
+        if delta.seconds < 3600:
+            return "меньше часа назад"
+        hours = delta.seconds // 3600
+        return f"{hours} ч назад"
+    if delta.days == 1:
+        return "вчера"
+    if delta.days < 7:
+        return f"{delta.days} дн назад"
+    return parsed_at.strftime("%d.%m.%Y")
 
 
 def format_listing_card(
@@ -48,10 +67,12 @@ def format_listing_card(
     lines.append(price_line)
     if district_line:
         lines.append(district_line)
+    if listing.parsed_at:
+        lines.append(f"🕐 Заметили у себя: {_freshness_label(listing.parsed_at)}")
 
     if explanation is not None:
         lines.append(f"\n⭐ Подходит вам: {explanation['score']}%")
-        lines.append(_checklist_line(explanation) + "\n")
+        lines.append(_checklist_line(listing, explanation) + "\n")
     else:
         lines.append("")
 
@@ -61,11 +82,17 @@ def format_listing_card(
     return "\n".join(lines)
 
 
-def _checklist_line(explanation: dict) -> str:
+def _checklist_line(listing: Listing, explanation: dict) -> str:
     items = [
         "✅ Бюджет" if explanation["budget_ok"] else "⚠️ Бюджет не указан",
         "✅ Район" if explanation["district_ok"] else "⚠️ Район не уточнён",
-        "✅ Пол соседей" if explanation["roommate_gender_ok"] else "⚠️ Пол соседей не уточнён",
-        "✅ Тип жилья" if explanation["housing_type_ok"] else "⚠️ Тип жилья не уточнён",
     ]
+    # "Пол соседей" неприменим к квартире (там не подселяются к соседям —
+    # см. services/matching.py) — показывать его там нечего, поле и так
+    # всегда ✅ автоматически, это не сигнал, а шум.
+    if listing.housing_type != "apartment":
+        items.append(
+            "✅ Пол соседей" if explanation["roommate_gender_ok"] else "⚠️ Пол соседей не уточнён"
+        )
+    items.append("✅ Тип жилья" if explanation["housing_type_ok"] else "⚠️ Тип жилья не уточнён")
     return " · ".join(items)

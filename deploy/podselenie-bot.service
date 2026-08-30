@@ -1,0 +1,24 @@
+[Unit]
+Description=Podselenie Bot — Telegram-бот для поиска подселения в Минске
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/podselenie-bot
+ExecStart=/home/botuser/podselenie-bot/.venv/bin/python3 bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Небольшая защита: процесс бота не должен иметь возможности что-то
+# менять за пределами своей рабочей папки.
+ProtectSystem=strict
+ReadWritePaths=/home/botuser/podselenie-bot
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

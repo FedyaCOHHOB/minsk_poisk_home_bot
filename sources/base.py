@@ -15,6 +15,9 @@ from sources.schemas import RawListing
 class SearchParams:
     # Пустой список или [District.ANY] = без ограничения по району.
     districts: list[District] = field(default_factory=list)
+    # Категории Kufar для запроса: "komnatu" и/или "kvartiru".
+    # Заполняется через sources.kufar.categories_for_housing_type().
+    categories: list[str] = field(default_factory=lambda: ["komnatu"])
 
 
 class BaseListingSource(ABC):

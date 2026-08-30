@@ -1,5 +1,5 @@
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -27,7 +27,7 @@ async def cmd_start(message: Message, session_factory: async_sessionmaker) -> No
         )
 
     await message.answer(
-        "Привет! Я помогу найти подселение или комнату в Минске.\n\n"
+        "Привет! Я помогу найти подселение, комнату или квартиру в Минске.\n\n"
         "Сначала заполни анкету — это займёт пару минут.",
         reply_markup=main_menu_kb(),
     )
@@ -55,8 +55,31 @@ async def help_handler(message: Message) -> None:
     await message.answer(
         "🏠 Найти жильё — поиск подходящих объявлений с Kufar по твоей анкете\n"
         "👤 Моя анкета — посмотреть/заполнить анкету\n"
-        "❤️ Сохранённые — то, что ты сохранил во время поиска\n\n"
+        "❤️ Сохранённые — то, что ты сохранил во время поиска\n"
+        "🔔 Уведомления — присылать новые подходящие варианты автоматически\n\n"
         "Команда /profile — заполнить или пересоздать анкету.\n"
         "Команда /quicksearch — разовый быстрый поиск (3 вопроса), "
-        "не трогая сохранённую анкету."
+        "не трогая сохранённую анкету.\n"
+        "Команда /privacy — какие данные храню и как их удалить."
+    )
+
+
+@router.message(Command("privacy"))
+async def privacy_handler(message: Message) -> None:
+    await message.answer(
+        "🔒 <b>Приватность</b>\n\n"
+        "Что храню:\n"
+        "• Из анкеты — пол, возраст, бюджет, районы, тип жилья, "
+        "предпочтения по соседям, привычки и текст «о себе» (если указал)\n"
+        "• Технически — твой Telegram ID и username\n"
+        "• Что сохранил (❤️) и подписан ли на уведомления — чтобы "
+        "показывать это тебе же\n\n"
+        "Кому передаю: никому. Объявления беру с открытых страниц "
+        "Kufar.by — твои личные данные туда не уходят, поиск идёт локально "
+        "в моей базе.\n\n"
+        "Как удалить:\n"
+        "⚙️ Настройки → 🗑 Удалить анкету — удаляет только анкету, "
+        "сохранённое остаётся\n"
+        "⚙️ Настройки → ⚠️ Удалить все мои данные — удаляет вообще всё "
+        "безвозвратно"
     )

@@ -50,6 +50,7 @@ class RoommateGender(str, enum.Enum):
 class HousingType(str, enum.Enum):
     ROOM = "room"          # комната
     SUBLET = "sublet"      # подселение
+    APARTMENT = "apartment"  # квартира (отдельная категория на Kufar — не просто фильтр)
     ANY = "any"            # неважно
 
 
@@ -198,3 +199,43 @@ class Favorite(Base):
     listing: Mapped["Listing"] = relationship()
 
     __table_args__ = (UniqueConstraint("user_id", "listing_id"),)
+
+
+class NotificationSubscription(Base):
+    """Одна подписка на пользователя — вкл/выкл, без множественных
+    подписок с разными параметрами (для MVP этого достаточно, критерии
+    поиска берутся из Profile пользователя, а не хранятся здесь отдельно)."""
+
+    __tablename__ = "notification_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    min_score: Mapped[int] = mapped_column(Integer, default=70)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PendingNotification(Base):
+    """Найденные фоновым циклом объявления, которые ждут ответа
+    "Показать"/"Не сейчас" от пользователя (см. services/notifications.py).
+
+    Хранится в БД, а НЕ пишется напрямую в FSM пользователя в момент
+    находки — иначе фоновый цикл рисковал бы молча прервать то, чем
+    человек занят ПРЯМО СЕЙЧАС (например, как раз заполняет анкету), если
+    уведомление совпадёт по времени с активным диалогом. FSM-состояние
+    трогаем только в ответ на явный клик по кнопке "Показать" — тогда
+    это осознанное действие самого пользователя, а не вмешательство
+    в фоне без его ведома."""
+
+    __tablename__ = "pending_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    listing_ids_json: Mapped[str] = mapped_column(Text)
+    explanations_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

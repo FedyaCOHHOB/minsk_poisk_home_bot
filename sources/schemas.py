@@ -23,3 +23,5 @@ class RawListing:
     # поэтому это не «угадано» эвристикой, а достоверно.
     district: str | None = None
     image_url: str | None = None
+    housing_type: str | None = None  # "room" | "apartment" — по тому, из какой
+    # категории Kufar реально пришло объявление (надёжно, не эвристика)

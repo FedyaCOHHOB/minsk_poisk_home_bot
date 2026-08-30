@@ -8,16 +8,21 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import crud
-from database.models import District, Listing
+from database.models import District, HousingType, Listing
 from sources.base import SearchParams
-from sources.kufar import KufarSource
+from sources.kufar import KufarSource, categories_for_housing_type
 
 logger = logging.getLogger(__name__)
 
 
-async def search_and_store(session: AsyncSession, districts: list[District]) -> list[Listing]:
+async def search_and_store(
+    session: AsyncSession,
+    districts: list[District],
+    housing_type: HousingType = HousingType.ANY,
+) -> list[Listing]:
     source = KufarSource()
-    raw_listings = await source.fetch(SearchParams(districts=districts))
+    categories = categories_for_housing_type(housing_type)
+    raw_listings = await source.fetch(SearchParams(districts=districts, categories=categories))
 
     listings: list[Listing] = []
     for raw in raw_listings:
@@ -33,7 +38,8 @@ ALL_REAL_DISTRICTS = [d for d in District if d != District.ANY]
 
 
 async def update_all_listings(session: AsyncSession) -> int:
-    """Для /update — прогоняет по всем районам сразу, чтобы база была
-    свежей ещё до того, как конкретный пользователь запустит поиск."""
-    listings = await search_and_store(session, ALL_REAL_DISTRICTS)
+    """Для /update — прогоняет по всем районам и обеим категориям (комнаты
+    и квартиры) сразу, чтобы база была свежей ещё до того, как конкретный
+    пользователь запустит поиск."""
+    listings = await search_and_store(session, ALL_REAL_DISTRICTS, housing_type=HousingType.ANY)
     return len(listings)

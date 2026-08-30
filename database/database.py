@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -14,7 +15,33 @@ from database.models import Base
 
 
 def make_engine(db_path: str):
-    return create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
+
+    # Раньше в базу писали только по одной операции за раз — реакция на
+    # действия пользователя. С появлением фонового шедулера уведомлений
+    # (services/notifications.py, раз в 20 минут) конкурентный доступ стал
+    # реальным сценарием: фоновая проверка может пересечься по времени с
+    # обычным поиском пользователя или ручным /update у админа.
+    # Дефолтный journal_mode SQLite (DELETE) блокирует читателей на время
+    # записи БЕЗ ожидания — сразу падает с "database is locked". WAL
+    # позволяет читать во время записи, а busy_timeout заставляет SQLite
+    # немного подождать перед тем как сдаться, вместо мгновенного отказа.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        # SQLite по умолчанию НЕ проверяет внешние ключи, даже если в схеме
+        # написано ondelete="CASCADE" (это известная особенность SQLite, не
+        # баг SQLAlchemy) — без этой строки все cascade-правила в моделях
+        # были объявлены, но никогда не применялись на уровне БД. Схема в
+        # уже существующих bot.db уже содержит "ON DELETE CASCADE" (это
+        # часть DDL, а не рантайм-настройка) — пересоздавать базу не нужно,
+        # просто начинаем реально проверять то, что там уже написано.
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return engine
 
 
 def make_session_factory(engine) -> async_sessionmaker[AsyncSession]:

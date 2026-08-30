@@ -212,7 +212,7 @@ async def _run_search(
         else:
             profile = quick_profile
 
-        candidates = await search_and_store(session, districts)
+        candidates = await search_and_store(session, districts, housing_type=profile.housing_type)
 
         explanations: dict[str, dict] = {}
         matched_ids: list[int] = []
@@ -413,4 +413,69 @@ async def restart_search(
     except TelegramBadRequest:
         pass
     await callback.message.answer("Возвращаемся в меню 🙂", reply_markup=main_menu_kb())
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------
+# Ответ на уведомление ("Нашёл N вариантов — показать?", см.
+# services/notifications.py). Результат лежит в БД (PendingNotification),
+# а не в FSM — состояние диалога выставляем ЗДЕСЬ, только в ответ на явный
+# клик пользователя, а не заранее из фонового цикла (иначе рисковали бы
+# молча прервать то, чем человек занят прямо сейчас — см. докстринг
+# services/notifications.py).
+# --------------------------------------------------------------------------
+
+@router.callback_query(F.data == "notif:show")
+async def show_notification_results(
+    callback: CallbackQuery, state: FSMContext, session_factory: async_sessionmaker
+) -> None:
+    async with session_scope(session_factory) as session:
+        user = await crud.get_or_create_user(
+            session, telegram_id=callback.from_user.id, username=None, first_name=None
+        )
+        pending = await crud.get_pending_notification(session, user.id)
+        if pending is not None:
+            await crud.clear_pending_notification(session, user.id)
+
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+
+    if pending is None:
+        # Например, два клика подряд, или находка уже устарела и была
+        # заменена более свежей (см. crud.set_pending_notification).
+        await callback.message.answer(
+            "Эти варианты уже не актуальны — попробуй обычный поиск через «🏠 Найти жильё».",
+            reply_markup=main_menu_kb(),
+        )
+        await callback.answer()
+        return
+
+    listing_ids, explanations = pending
+    await state.set_state(SearchSession.browsing)
+    await state.update_data(
+        listing_ids=listing_ids,
+        explanations=explanations,
+        index=0,
+        card_message_id=None,
+        source="notification",
+    )
+    await _show_card(
+        chat_id=callback.message.chat.id, bot=callback.bot, state=state, session_factory=session_factory
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "notif:dismiss")
+async def dismiss_notification_results(
+    callback: CallbackQuery, session_factory: async_sessionmaker
+) -> None:
+    async with session_scope(session_factory) as session:
+        user = await crud.get_or_create_user(
+            session, telegram_id=callback.from_user.id, username=None, first_name=None
+        )
+        await crud.clear_pending_notification(session, user.id)
+
+    await callback.message.edit_text("Хорошо, пропускаем эти варианты.")
     await callback.answer()

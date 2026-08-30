@@ -136,12 +136,19 @@ async def finish_districts(callback: CallbackQuery, state: FSMContext) -> None:
 async def process_housing_type(callback: CallbackQuery, state: FSMContext) -> None:
     value = callback.data.split(":", 1)[1]
     await state.update_data(housing_type=value)
-    await state.set_state(ProfileForm.roommate_gender)
-
     await callback.message.edit_text("Тип жилья выбран ✅")
-    await callback.message.answer(
-        "К кому готов(а) подселиться?", reply_markup=roommate_gender_kb()
-    )
+
+    if value == "apartment":
+        # При квартире вопрос "к кому подселиться" не имеет смысла — там
+        # не подселяются к соседям, снимают жильё целиком.
+        await state.update_data(roommate_gender=RoommateGender.ANY.value)
+        await state.set_state(ProfileForm.pets)
+        await callback.message.answer("Есть животные?", reply_markup=yes_no_kb("pets"))
+    else:
+        await state.set_state(ProfileForm.roommate_gender)
+        await callback.message.answer(
+            "К кому готов(а) подселиться?", reply_markup=roommate_gender_kb()
+        )
     await callback.answer()
 
 

@@ -10,15 +10,18 @@
                        нужно только число (обратная совместимость)
 
 ВАЖНОЕ ОГРАНИЧЕНИЕ, которое стоит держать в голове:
-Kufar не даёт структурированных полей «тип жилья» (комната/подселение) и
-«пол соседей» — у нас есть только сырой текст объявления. Эти два критерия
-здесь СОЗНАТЕЛЬНО не участвуют в жёстком фильтре match_listing(), только в
-рейтинге: текстовая эвристика может ошибаться (не найти слово или найти
-его не в том смысле), и жёстко отбрасывать объявление из-за этого —
-значит терять реальные варианты. Жёсткий фильтр — только по бюджету,
-который у Kufar есть как число (когда цена не «Договорная»). Район уже
-гарантированно верный: мы намеренно ходим только по URL нужного района
-(см. sources/kufar.py), а не угадываем его из текста.
+Kufar не даёт структурированного поля «пол соседей» — у нас есть только
+сырой текст объявления. Различение «комната» vs «подселение» — тоже
+эвристика по тексту (обе категории вперемешку под /snyat/komnatu). Эти
+критерии здесь СОЗНАТЕЛЬНО не участвуют в жёстком фильтре match_listing(),
+только в рейтинге: текстовая эвристика может ошибаться (не найти слово
+или найти его не в том смысле), и жёстко отбрасывать объявление из-за
+этого — значит терять реальные варианты. А вот «квартира» — это
+ДОСТОВЕРНЫЙ факт (Kufar отдаёт её отдельной категорией /snyat/kvartiru,
+см. sources/kufar.py), не эвристика. Жёсткий фильтр match_listing() —
+только по бюджету, который у Kufar есть как число (когда цена не
+«Договорная»). Район уже гарантированно верный: мы намеренно ходим
+только по URL нужного района, а не угадываем его из текста.
 
 Поэтому там, где эвристика НЕ смогла подтвердить совпадение (например,
 объявление просто не упомянуло пол соседей явно), explain_match() не
@@ -37,6 +40,7 @@ from database.models import HousingType, Listing, Profile, RoommateGender
 BYN_TO_USD_RATE = 3.2
 
 SUBLET_KEYWORDS = ("подсел", "койко-мест", "койко мест")
+NOT_SUBLET_MARKERS = ("без подсел",)  # "без подселения" — отрицание, не сама подсказка
 NO_PETS_KEYWORDS = ("без животных", "без домашних животных")
 NO_SMOKING_KEYWORDS = ("без вредных привычек", "не курю", "некурящ")
 
@@ -122,7 +126,18 @@ def explain_match(profile: Profile | QuickProfile, listing: Listing) -> MatchExp
     # Район уже гарантированно верный (см. докстринг модуля).
     district_ok = bool(listing.district)
 
-    if profile.preferred_roommate_gender == RoommateGender.ANY:
+    is_sublet = _is_sublet(text)
+    is_apartment = listing.housing_type == "apartment"
+
+    # "Пол соседей" — понятие, применимое только к комнате/подселению (там
+    # реально ЖИВЁШЬ с кем-то). Для квартиры это не имеет смысла — там не
+    # подселяются к соседям (см. правку в handlers/profile.py: при выборе
+    # "Квартира" мы даже не задаём этот вопрос). Если считать его как обычно,
+    # квартиры в поиске "неважно" систематически проигрывали бы в score —
+    # в объявлениях о квартирах пол почти никогда не упоминается, и
+    # эвристика честно возвращала бы False там, где вопрос попросту не
+    # применим. Поэтому для квартир — всегда True (не штрафуем).
+    if is_apartment or profile.preferred_roommate_gender == RoommateGender.ANY:
         roommate_gender_ok = True
     elif profile.preferred_roommate_gender == RoommateGender.FEMALE:
         roommate_gender_ok = _mentions(text, FEMALE_KEYWORDS)
@@ -131,13 +146,14 @@ def explain_match(profile: Profile | QuickProfile, listing: Listing) -> MatchExp
     else:
         roommate_gender_ok = False
 
-    is_sublet = _mentions(text, SUBLET_KEYWORDS)
     if profile.housing_type == HousingType.ANY:
         housing_type_ok = True
+    elif profile.housing_type == HousingType.APARTMENT:
+        housing_type_ok = is_apartment  # достоверно — из какой категории Kufar пришло
     elif profile.housing_type == HousingType.SUBLET:
-        housing_type_ok = is_sublet
+        housing_type_ok = not is_apartment and is_sublet
     else:  # ROOM
-        housing_type_ok = not is_sublet
+        housing_type_ok = not is_apartment and not is_sublet
 
     score = 0
     if budget_ok:
@@ -173,3 +189,9 @@ def match_score(profile: Profile | QuickProfile, listing: Listing) -> int:
 
 def _mentions(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def _is_sublet(text: str) -> bool:
+    if any(marker in text for marker in NOT_SUBLET_MARKERS):
+        return False
+    return _mentions(text, SUBLET_KEYWORDS)

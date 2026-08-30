@@ -2,9 +2,10 @@
 только через эти функции."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -14,6 +15,8 @@ from database.models import (
     Gender,
     HousingType,
     Listing,
+    NotificationSubscription,
+    PendingNotification,
     Profile,
     ProfileDistrict,
     RoommateGender,
@@ -83,6 +86,7 @@ async def upsert_listing(session: AsyncSession, raw: RawListing) -> Listing:
     listing.district = raw.district
     listing.url = raw.url
     listing.image_url = raw.image_url
+    listing.housing_type = raw.housing_type
     listing.is_active = True
 
     await session.flush()
@@ -237,3 +241,141 @@ async def delete_profile(session: AsyncSession, telegram_id: int) -> bool:
     await session.delete(profile)
     await session.flush()
     return True
+
+
+# --------------------------------------------------------------------------
+# Уведомления
+# --------------------------------------------------------------------------
+
+async def get_user_by_id(session: AsyncSession, user_id: int) -> User | None:
+    result = await session.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def get_profile_by_user_id(session: AsyncSession, user_id: int) -> Profile | None:
+    """Как get_profile_by_telegram_id, но по внутреннему User.id — нужно
+    для фонового цикла уведомлений, где под рукой только user_id из
+    NotificationSubscription, а не telegram_id."""
+    result = await session.execute(
+        select(Profile)
+        .where(Profile.user_id == user_id)
+        .options(selectinload(Profile.districts))
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_subscription(session: AsyncSession, user_id: int) -> NotificationSubscription | None:
+    result = await session.execute(
+        select(NotificationSubscription).where(NotificationSubscription.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def set_subscription_active(
+    session: AsyncSession, user_id: int, active: bool
+) -> NotificationSubscription:
+    sub = await get_subscription(session, user_id)
+    if sub is None:
+        sub = NotificationSubscription(user_id=user_id, is_active=active, last_checked_at=utcnow())
+        session.add(sub)
+    else:
+        sub.is_active = active
+        if active:
+            # Включили заново — не шлём разом всё, что накопилось, пока было
+            # выключено. Считаем "новым" только то, что появится с этого момента.
+            sub.last_checked_at = utcnow()
+    await session.flush()
+    return sub
+
+
+async def get_active_subscriptions(session: AsyncSession) -> list[NotificationSubscription]:
+    result = await session.execute(
+        select(NotificationSubscription).where(NotificationSubscription.is_active == True)  # noqa: E712
+    )
+    return list(result.scalars().all())
+
+
+async def update_subscription_checked(
+    session: AsyncSession, subscription_id: int, checked_at
+) -> None:
+    await session.execute(
+        update(NotificationSubscription)
+        .where(NotificationSubscription.id == subscription_id)
+        .values(last_checked_at=checked_at)
+    )
+
+
+async def get_new_listings_since(
+    session: AsyncSession, since, districts: list[str] | None = None
+) -> list[Listing]:
+    """"Новое" = впервые увиденное нами после `since` (Listing.parsed_at
+    не трогается при повторных upsert — см. database/crud.upsert_listing —
+    так что это надёжная метка первого появления, а не "последнего
+    обновления записи")."""
+    query = select(Listing).where(Listing.parsed_at > since, Listing.is_active == True)  # noqa: E712
+    if districts:
+        query = query.where(Listing.district.in_(districts))
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def delete_user_completely(session: AsyncSession, telegram_id: int) -> bool:
+    """Полное удаление пользователя и вообще всех его данных (анкета,
+    районы, избранное, подписка на уведомления). Полагается на
+    ON DELETE CASCADE в схеме — теперь безопасно, PRAGMA foreign_keys
+    включена (см. database/database.py), явно чистить дочерние таблицы
+    вручную не нужно."""
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return False
+    await session.delete(user)
+    await session.flush()
+    return True
+
+
+# --------------------------------------------------------------------------
+# Отложенные результаты уведомлений (см. докстринг PendingNotification)
+# --------------------------------------------------------------------------
+
+async def set_pending_notification(
+    session: AsyncSession, user_id: int, listing_ids: list[int], explanations: dict
+) -> None:
+    result = await session.execute(
+        select(PendingNotification).where(PendingNotification.user_id == user_id)
+    )
+    pending = result.scalar_one_or_none()
+    ids_json = json.dumps(listing_ids)
+    exp_json = json.dumps(explanations)
+
+    if pending is None:
+        pending = PendingNotification(
+            user_id=user_id, listing_ids_json=ids_json, explanations_json=exp_json
+        )
+        session.add(pending)
+    else:
+        # Если предыдущий цикл уже что-то нашёл, а пользователь ещё не
+        # ответил — просто заменяем на более свежую находку, не плодим
+        # вторую строку.
+        pending.listing_ids_json = ids_json
+        pending.explanations_json = exp_json
+
+    await session.flush()
+
+
+async def get_pending_notification(
+    session: AsyncSession, user_id: int
+) -> tuple[list[int], dict] | None:
+    result = await session.execute(
+        select(PendingNotification).where(PendingNotification.user_id == user_id)
+    )
+    pending = result.scalar_one_or_none()
+    if pending is None:
+        return None
+    return json.loads(pending.listing_ids_json), json.loads(pending.explanations_json)
+
+
+async def clear_pending_notification(session: AsyncSession, user_id: int) -> None:
+    await session.execute(
+        delete(PendingNotification).where(PendingNotification.user_id == user_id)
+    )

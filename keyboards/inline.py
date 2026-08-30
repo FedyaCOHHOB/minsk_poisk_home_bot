@@ -19,6 +19,7 @@ def housing_type_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Комната", callback_data="housing:room")],
             [InlineKeyboardButton(text="Подселение", callback_data="housing:sublet")],
+            [InlineKeyboardButton(text="Квартира", callback_data="housing:apartment")],
             [InlineKeyboardButton(text="Неважно", callback_data="housing:any")],
         ]
     )
@@ -138,6 +139,7 @@ def settings_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить анкету", callback_data="settings:edit_profile")],
             [InlineKeyboardButton(text="🗑 Удалить анкету", callback_data="settings:delete_profile")],
+            [InlineKeyboardButton(text="⚠️ Удалить все мои данные", callback_data="settings:delete_all")],
         ]
     )
 
@@ -150,4 +152,25 @@ def confirm_delete_profile_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Отмена", callback_data="settings:delete_profile:cancel"),
             ]
         ]
+    )
+
+
+def confirm_delete_all_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить всё", callback_data="settings:delete_all:confirm"),
+                InlineKeyboardButton(text="Отмена", callback_data="settings:delete_all:cancel"),
+            ]
+        ]
+    )
+
+
+def notifications_kb(is_active: bool) -> InlineKeyboardMarkup:
+    if is_active:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔕 Выключить", callback_data="notif:disable")]]
+        )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔔 Включить", callback_data="notif:enable")]]
     )

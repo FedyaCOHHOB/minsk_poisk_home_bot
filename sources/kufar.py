@@ -1,35 +1,41 @@
-"""Источник объявлений — Kufar (re.kufar.by), категория «Комнаты» в Минске.
+"""Источник объявлений — Kufar (re.kufar.by), категории «Комнаты» и
+«Квартиры» в Минске.
 
-ВАЖНЫЕ ВЫВОДЫ РАЗВЕДКИ (Этап 3), на которых строится этот модуль:
+ВАЖНЫЕ ВЫВОДЫ РАЗВЕДКИ (Этап 3 + добавление квартир), на которых строится
+этот модуль:
 
-1. Страница `re.kufar.by/l/minsk/snyat/komnatu` отдаёт готовый HTML с данными
-   объявлений без выполнения JS — простого GET-запроса достаточно,
-   headless-браузер не нужен.
+1. Страницы `re.kufar.by/l/minsk/snyat/komnatu` и `.../snyat/kvartiru`
+   отдают готовый HTML с данными объявлений без выполнения JS — простого
+   GET-запроса достаточно, headless-браузер не нужен. Разметка карточек
+   идентична в обеих категориях (проверено).
 2. `robots.txt` разрешает «чистые» canonical-адреса без query-параметров,
-   но запрещает URL с `?...` (проверено на двух разных примерах). Поэтому
-   этот модуль СОЗНАТЕЛЬНО не использует query-параметры вообще: ни
-   `?cur=USD`, ни курсорную пагинацию. Берём первую страницу выдачи
-   (~30 объявлений) по каждому запрошенному району.
+   но запрещает URL с `?...` (проверено на нескольких примерах в обеих
+   категориях). Поэтому этот модуль СОЗНАТЕЛЬНО не использует
+   query-параметры вообще: ни `?cur=USD`, ни курсорную пагинацию. Берём
+   первую страницу выдачи (~30 объявлений) по каждому запрошенному
+   району и каждой запрошенной категории.
 3. У Kufar уже есть готовая фильтрация по официальным районам Минска прямо
-   в пути: `/l/minsk-<slug>-rajon/snyat/komnatu`. Слаги centralnyj-rajon,
-   frunzenskij-rajon, sovetskij-rajon, oktyabrskij-rajon подтверждены
-   вручную. Остальные — по устойчивому паттерну транслитерации, не
-   проверены поштучно (см. DISTRICT_SLUGS ниже).
+   в пути: `/l/minsk-<slug>-rajon/snyat/<категория>`. Все 9 слагов из
+   DISTRICT_SLUGS подтверждены напрямую со страницы фильтров Kufar (была
+   отдельная проверка помимо изначальной разведки — раньше часть слагов
+   были только предположением по паттерну транслитерации).
 4. Без `?cur=USD` цена приходит в белорусских рублях (BYN), не в USD.
    Конвертация для сравнения с бюджетом анкеты (он в USD) — забота
    matching.py, а не этого модуля: тут мы просто честно сохраняем то,
    что видим, с пометкой валюты.
-5. Kufar не делит объявления на «комната» и «подселение» как отдельные
-   категории — оба типа приходят вперемешку под /snyat/komnatu. Различать
-   их — задача текстовой эвристики в matching.py, не этого модуля.
+5. Комнаты и подселение — НЕ разные категории на Kufar, оба типа приходят
+   вперемешку под /snyat/komnatu. Различать их — задача текстовой
+   эвристики в matching.py. А вот квартиры — это ДЕЙСТВИТЕЛЬНО отдельная
+   категория (/snyat/kvartiru) с отдельным URL, поэтому здесь это не
+   эвристика, а достоверный факт: из какой категории пришло объявление,
+   в такую и попало поле RawListing.housing_type ("room"/"apartment").
 
 ЧТО ТОЧНО ПОТРЕБУЕТ ДОРАБОТКИ:
-Извлечение полей сейчас идёт из «слипшегося» текста ссылки-карточки
-(вся карточка — один <a>, внутри — заголовок, цена, адрес, описание без
-явных разделителей). Это рабочий черновик первого прохода, а не
-финальная версия — как только реальный вывод скрипта будет перед глазами
-(test_kufar_source.py), регулярки на title/address почти наверняка
-потребуется подправить под то, что видно на самом деле.
+Извлечение title/description всё ещё идёт из «слипшегося» текста
+ссылки-карточки эвристиками (см. _clean_text, _split_address_and_body).
+Адрес извлекается неплохо (проверено на реальных примерах), но это
+по-прежнему не парсинг настоящей DOM-структуры, а разбор текстового
+блока — при существенном изменении вёрстки Kufar может потребовать правок.
 """
 from __future__ import annotations
 
@@ -40,7 +46,7 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
-from database.models import District
+from database.models import District, HousingType
 from sources.base import BaseListingSource, SearchParams
 from sources.schemas import RawListing
 
@@ -59,10 +65,8 @@ DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Проверены вручную: CENTRALNY, FRUNZENSKY, SOVETSKY, OKTYABRSKY.
-# Остальные — по паттерну, требуют проверки при первом реальном запуске
-# (если для района приходит 0 объявлений там, где их явно быть не может —
-# скорее всего, неверный слаг).
+# Все 9 подтверждены напрямую со страницы фильтров Kufar (блок "Район" на
+# /l/minsk/snyat/kvartiru), не только по паттерну транслитерации.
 DISTRICT_SLUGS: dict[District, str] = {
     District.CENTRALNY: "centralnyj-rajon",
     District.FRUNZENSKY: "frunzenskij-rajon",
@@ -74,6 +78,25 @@ DISTRICT_SLUGS: dict[District, str] = {
     District.SOVETSKY: "sovetskij-rajon",
     District.PARTIZANSKY: "partizanskij-rajon",
 }
+
+# Категории Kufar — путь после /snyat/. "room" — общее имя для нашей
+# ROOM/SUBLET (Kufar их не различает), "apartment" — для kvartiru.
+CATEGORY_PATHS: dict[str, str] = {
+    "room": "komnatu",
+    "apartment": "kvartiru",
+}
+
+
+def categories_for_housing_type(housing_type: HousingType) -> list[str]:
+    """Какие категории Kufar запрашивать для данного предпочтения жилья.
+    ANY — обе категории (двойной набор запросов, но по-прежнему один
+    запрос на район на категорию, в рамках допустимого robots.txt)."""
+    if housing_type == HousingType.APARTMENT:
+        return ["apartment"]
+    if housing_type == HousingType.ANY:
+        return ["room", "apartment"]
+    return ["room"]  # ROOM, SUBLET — одна и та же категория Kufar
+
 
 # /vi/minsk/snyat/komnatu-dolgosrochno/1-k/1082235025?block_name=... → id в конце пути
 LISTING_HREF_RE = re.compile(r"/vi/[^\"'?]+?/(\d+)(?:\?|$)")
@@ -101,38 +124,53 @@ class KufarSource(BaseListingSource):
         self.request_delay = request_delay
         self.timeout = timeout
 
-    def _build_url(self, district: District | None) -> str:
+    def _build_url(self, district: District | None, category: str) -> str:
         slug = DISTRICT_SLUGS.get(district) if district else None
         path = f"/l/minsk-{slug}" if slug else "/l/minsk"
-        return f"{BASE_HOST}{path}/snyat/komnatu"
+        category_path = CATEGORY_PATHS[category]
+        return f"{BASE_HOST}{path}/snyat/{category_path}"
 
     async def fetch(self, params: SearchParams) -> list[RawListing]:
         districts = [d for d in params.districts if d != District.ANY]
-        # Без ограничений по району — один запрос по всему городу.
-        targets: list[District | None] = list(districts) or [None]
+        # "Любой район" — раньше здесь был ОДИН запрос по всему городу без
+        # привязки к району (targets=[None]), из-за чего такие объявления
+        # получали district=None. Это ломало сразу две вещи: district_ok в
+        # score всегда был False (см. services/matching.py), и уведомления
+        # никогда не находили совпадений, потому что искали Listing.district
+        # == "any" — а такого значения не бывает физически. Теперь вместо
+        # одного нерасличимого запроса — по одному на каждый настоящий район
+        # (тот же список, что использует /update у админа), чтобы у всех
+        # объявлений всегда был настоящий, а не пустой район.
+        targets: list[District | None] = list(districts) or list(DISTRICT_SLUGS.keys())
+        categories = params.categories or ["room"]
 
         # Дедуп на случай, если один и тот же listing попал в выдачу
         # нескольких районов (маловероятно, но не бесплатно проверить).
         collected: dict[str, RawListing] = {}
 
+        request_pairs = [(d, c) for d in targets for c in categories]
+
         async with httpx.AsyncClient(
             headers=DEFAULT_HEADERS, timeout=self.timeout
         ) as client:
-            for i, district in enumerate(targets):
+            for i, (district, category) in enumerate(request_pairs):
                 if i > 0:
                     await asyncio.sleep(self.request_delay)
 
-                url = self._build_url(district)
+                url = self._build_url(district, category)
                 html = await self._get_with_retry(client, url)
                 if html is None:
                     logger.warning("Не удалось получить %s, пропускаю", url)
                     continue
 
                 district_label = district.value if district else None
-                for listing in self._parse_html(html, district_label):
+                for listing in self._parse_html(html, district_label, category):
                     collected[listing.external_id] = listing
 
-        logger.info("Kufar: собрано %s объявлений (%s запросов)", len(collected), len(targets))
+        logger.info(
+            "Kufar: собрано %s объявлений (%s запросов, категории: %s)",
+            len(collected), len(request_pairs), categories,
+        )
         return list(collected.values())
 
     async def _get_with_retry(
@@ -156,7 +194,9 @@ class KufarSource(BaseListingSource):
                 await asyncio.sleep(2 ** attempt)  # 2s, 4s
         return None
 
-    def _parse_html(self, html: str, district_label: str | None) -> list[RawListing]:
+    def _parse_html(
+        self, html: str, district_label: str | None, category: str
+    ) -> list[RawListing]:
         soup = BeautifulSoup(html, "lxml")
         listings: list[RawListing] = []
         seen_ids: set[str] = set()
@@ -192,6 +232,7 @@ class KufarSource(BaseListingSource):
                     url=self._absolute_url(a["href"]),
                     district=district_label,
                     image_url=image_url,
+                    housing_type=category,  # "room" | "apartment" — достоверно
                 )
             )
 
@@ -223,12 +264,6 @@ class KufarSource(BaseListingSource):
         cleaned = TRAILING_NOISE_RE.sub("", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
         return cleaned
-
-    @staticmethod
-    def _make_title(cleaned: str, max_len: int = 100) -> str:
-        if len(cleaned) <= max_len:
-            return cleaned
-        return cleaned[:max_len].rsplit(" ", 1)[0] + "…"
 
     @staticmethod
     def _split_address_and_body(cleaned: str) -> tuple[str, str]:
@@ -266,3 +301,4 @@ class KufarSource(BaseListingSource):
     @staticmethod
     def _absolute_url(href: str) -> str:
         return href if href.startswith("http") else f"{BASE_HOST}{href}"
+

@@ -13,6 +13,7 @@ from database.models import (
 HOUSING_LABELS = {
     HousingType.ROOM: "комната",
     HousingType.SUBLET: "подселение",
+    HousingType.APARTMENT: "квартира",
     HousingType.ANY: "неважно",
 }
 
