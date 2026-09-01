@@ -25,6 +25,14 @@
    диалога трогаем только тогда, когда пользователь сам на это явно
    нажимает.
 
+   Если предыдущая находка ещё не получила ответа (пользователь не нажал
+   ни "Показать", ни "Не сейчас") — новая находка РЕДАКТИРУЕТ то же самое
+   сообщение, а не отправляет новое. Это решает сразу две вещи: не даёт
+   уведомлениям копиться в чате отдельными сообщениями за день (выглядело
+   как мусор), и не пингует пользователя повторным звуком/пушем — в
+   Telegram редактирование существующего сообщения проходит тихо, в
+   отличие от отправки нового.
+
 ТИХИЕ ЧАСЫ: весь цикл целиком пропускается с 23:00 до 08:00 по Минску —
 включая сам поход в Kufar (незачем тратить запросы ночью, если разослать
 уведомления всё равно нельзя). Пока это фиксированный дефолт для всех, не
@@ -118,8 +126,11 @@ async def _check_one_subscription(
     last_checked_at,
     min_score: int,
 ) -> None:
-    listing_ids: list[int] = []
     telegram_id: int | None = None
+    old_message_id: int | None = None
+    combined_listing_ids: list[int] = []
+    combined_explanations: dict[str, dict] = {}
+    found_anything_new = False
 
     async with session_scope(session_factory) as session:
         profile = await crud.get_profile_by_user_id(session, user_id)
@@ -133,6 +144,15 @@ async def _check_one_subscription(
         if user is None:
             return
         telegram_id = user.telegram_id
+
+        # Если предыдущая находка ещё не получила ответа — подхватываем и
+        # её message_id (чтобы обновить ТО ЖЕ сообщение), и сами объявления
+        # (чтобы НЕ ПОТЕРЯТЬ их — раньше здесь была ошибка: новая находка
+        # просто заменяла старую, и если пользователь не успел ответить до
+        # следующего цикла, показанные ему в сводке варианты из предыдущего
+        # раза бесследно исчезали, хотя он их так и не видел).
+        old_message_id = await crud.get_pending_message_id(session, user_id)
+        existing_pending = await crud.get_pending_notification(session, user_id)
 
         districts = [pd.district.value for pd in profile.districts]
         # "any" в списке означает "любой район" — это НЕ значение, которое
@@ -150,27 +170,82 @@ async def _check_one_subscription(
             if explanation.score >= min_score:
                 scored.append((listing, explanation))
 
-        scored.sort(key=lambda pair: pair[1].score, reverse=True)
-        scored = scored[:MAX_LISTINGS_PER_CYCLE]
+        found_anything_new = bool(scored)
 
-        listing_ids = [listing.id for listing, _ in scored]
-        explanations = {str(listing.id): exp.to_dict() for listing, exp in scored}
+        new_ids = [listing.id for listing, _ in scored]
+        new_explanations = {str(listing.id): exp.to_dict() for listing, exp in scored}
 
-        if listing_ids:
-            await crud.set_pending_notification(session, user_id, listing_ids, explanations)
+        if existing_pending:
+            existing_ids, existing_explanations = existing_pending
+            # dict.fromkeys — объединяем с сохранением порядка и без
+            # дублей, на случай если один listing попадётся дважды.
+            combined_listing_ids = list(dict.fromkeys(existing_ids + new_ids))
+            combined_explanations = {**existing_explanations, **new_explanations}
+        else:
+            combined_listing_ids = new_ids
+            combined_explanations = new_explanations
+
+        # Пересортировать по score и обрезать по потолку уже ПОСЛЕ
+        # объединения — иначе может накопиться больше MAX_LISTINGS_PER_CYCLE.
+        combined_listing_ids.sort(
+            key=lambda lid: combined_explanations.get(str(lid), {}).get("score", 0), reverse=True
+        )
+        combined_listing_ids = combined_listing_ids[:MAX_LISTINGS_PER_CYCLE]
+        combined_explanations = {
+            k: v for k, v in combined_explanations.items() if int(k) in combined_listing_ids
+        }
 
         await crud.update_subscription_checked(session, subscription_id, utcnow())
 
-    if not listing_ids:
+    if not found_anything_new:
+        # Нового в этот раз не появилось — не трогаем существующее
+        # сообщение зря, пусть висит как есть, пока пользователь не ответит
+        # или не появится что-то действительно новое.
         return
 
-    count = len(listing_ids)
+    count = len(combined_listing_ids)
     text = f"🔔 Нашёл для тебя {count} {_plural_variants(count)} — показать?"
-    try:
-        await bot.send_message(telegram_id, text, reply_markup=_confirm_kb())
-    except TelegramForbiddenError:
-        logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
-        async with session_scope(session_factory) as session:
-            await crud.set_subscription_active(session, user_id, False)
-    except TelegramBadRequest as exc:
-        logger.warning("Не удалось отправить уведомление %s: %s", telegram_id, exc)
+    kb = _confirm_kb()
+
+    new_message_id: int | None = None
+
+    if old_message_id is not None:
+        # Пробуем обновить уже существующее сообщение — тихо для
+        # пользователя (Telegram не шлёт повторный пуш на редактирование,
+        # в отличие от нового сообщения), и не плодит десяток отдельных
+        # уведомлений в чате за день.
+        try:
+            await bot.edit_message_text(
+                chat_id=telegram_id, message_id=old_message_id, text=text, reply_markup=kb
+            )
+            new_message_id = old_message_id
+        except TelegramForbiddenError:
+            logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
+            async with session_scope(session_factory) as session:
+                await crud.set_subscription_active(session, user_id, False)
+            return
+        except TelegramBadRequest as exc:
+            # Сообщение могли удалить вручную, оно могло устареть для
+            # редактирования и т.п. — просто отправим новое ниже.
+            logger.info(
+                "Не удалось отредактировать уведомление %s (%s), отправляю новое",
+                old_message_id, exc,
+            )
+
+    if new_message_id is None:
+        try:
+            sent = await bot.send_message(telegram_id, text, reply_markup=kb)
+            new_message_id = sent.message_id
+        except TelegramForbiddenError:
+            logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
+            async with session_scope(session_factory) as session:
+                await crud.set_subscription_active(session, user_id, False)
+            return
+        except TelegramBadRequest as exc:
+            logger.warning("Не удалось отправить уведомление %s: %s", telegram_id, exc)
+            return
+
+    async with session_scope(session_factory) as session:
+        await crud.set_pending_notification(
+            session, user_id, combined_listing_ids, combined_explanations, new_message_id
+        )

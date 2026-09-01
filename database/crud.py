@@ -338,8 +338,19 @@ async def delete_user_completely(session: AsyncSession, telegram_id: int) -> boo
 # Отложенные результаты уведомлений (см. докстринг PendingNotification)
 # --------------------------------------------------------------------------
 
+async def get_pending_message_id(session: AsyncSession, user_id: int) -> int | None:
+    result = await session.execute(
+        select(PendingNotification.summary_message_id).where(PendingNotification.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def set_pending_notification(
-    session: AsyncSession, user_id: int, listing_ids: list[int], explanations: dict
+    session: AsyncSession,
+    user_id: int,
+    listing_ids: list[int],
+    explanations: dict,
+    summary_message_id: int,
 ) -> None:
     result = await session.execute(
         select(PendingNotification).where(PendingNotification.user_id == user_id)
@@ -350,7 +361,10 @@ async def set_pending_notification(
 
     if pending is None:
         pending = PendingNotification(
-            user_id=user_id, listing_ids_json=ids_json, explanations_json=exp_json
+            user_id=user_id,
+            listing_ids_json=ids_json,
+            explanations_json=exp_json,
+            summary_message_id=summary_message_id,
         )
         session.add(pending)
     else:
@@ -359,6 +373,7 @@ async def set_pending_notification(
         # вторую строку.
         pending.listing_ids_json = ids_json
         pending.explanations_json = exp_json
+        pending.summary_message_id = summary_message_id
 
     await session.flush()
 

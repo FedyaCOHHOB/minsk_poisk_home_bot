@@ -477,5 +477,10 @@ async def dismiss_notification_results(
         )
         await crud.clear_pending_notification(session, user.id)
 
-    await callback.message.edit_text("Хорошо, пропускаем эти варианты.")
+    # Удаляем, а не оставляем висеть отредактированным "ок" — раньше эти
+    # подтверждения тоже копились в чате отдельными сообщениями.
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        await callback.message.edit_text("Хорошо, пропускаем эти варианты.")
     await callback.answer()

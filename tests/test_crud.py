@@ -138,7 +138,7 @@ class TestDeleteUserCompletely:
             listing = await crud.upsert_listing(session, _raw_listing("CASCADE1"))
             await crud.toggle_favorite(session, user.id, listing.id)
             await crud.set_subscription_active(session, user.id, True)
-            await crud.set_pending_notification(session, user.id, [listing.id], {str(listing.id): {"score": 90}})
+            await crud.set_pending_notification(session, user.id, [listing.id], {str(listing.id): {"score": 90}}, summary_message_id=555)
 
         async with session_scope_fixture() as session:
             deleted = await crud.delete_user_completely(session, 42)
@@ -209,12 +209,30 @@ class TestGetNewListingsSince:
             ext_ids = {l.external_id for l in found}
             assert {"CTR2", "FRZ2"}.issubset(ext_ids)
 
+    async def test_new_listing_found_even_within_same_second_as_checkpoint(self, session_scope_fixture):
+        """Реальный найденный баг: parsed_at раньше ставился через
+        server_default=func.now() (у SQLite — точность до целых секунд),
+        а last_checked_at генерируется в Python (микросекунды). Из-за
+        рассинхрона объявление, вставленное в ту же секунду, что и
+        обновление last_checked_at, могло ошибочно не засчитаться
+        "новым", хотя физически появилось позже. Теперь оба используют
+        Python-side default с одинаковой точностью — проверяем впритык,
+        на границе в 1 микросекунду."""
+        async with session_scope_fixture() as session:
+            listing = await crud.upsert_listing(session, _raw_listing("PREC1"))
+
+        cutoff = listing.parsed_at - timedelta(microseconds=1)
+
+        async with session_scope_fixture() as session:
+            found = await crud.get_new_listings_since(session, cutoff, ["central"])
+            assert "PREC1" in {l.external_id for l in found}
+
 
 class TestPendingNotification:
     async def test_set_get_clear_roundtrip(self, session_scope_fixture):
         async with session_scope_fixture() as session:
             user = await crud.get_or_create_user(session, telegram_id=5, username=None, first_name=None)
-            await crud.set_pending_notification(session, user.id, [1, 2, 3], {"1": {"score": 80}})
+            await crud.set_pending_notification(session, user.id, [1, 2, 3], {"1": {"score": 80}}, summary_message_id=111)
 
         async with session_scope_fixture() as session:
             pending = await crud.get_pending_notification(session, user.id)
@@ -231,8 +249,8 @@ class TestPendingNotification:
     async def test_repeated_set_overwrites_not_duplicates(self, session_scope_fixture):
         async with session_scope_fixture() as session:
             user = await crud.get_or_create_user(session, telegram_id=6, username=None, first_name=None)
-            await crud.set_pending_notification(session, user.id, [1], {"1": {}})
-            await crud.set_pending_notification(session, user.id, [1, 2, 3], {"1": {}, "2": {}, "3": {}})
+            await crud.set_pending_notification(session, user.id, [1], {"1": {}}, summary_message_id=222)
+            await crud.set_pending_notification(session, user.id, [1, 2, 3], {"1": {}, "2": {}, "3": {}}, summary_message_id=333)
 
         async with session_scope_fixture() as session:
             from database.models import PendingNotification
@@ -248,6 +266,29 @@ class TestPendingNotification:
         async with session_scope_fixture() as session:
             user = await crud.get_or_create_user(session, telegram_id=7, username=None, first_name=None)
             assert await crud.get_pending_notification(session, user.id) is None
+
+    async def test_message_id_stored_and_updated(self, session_scope_fixture):
+        async with session_scope_fixture() as session:
+            user = await crud.get_or_create_user(session, telegram_id=9, username=None, first_name=None)
+            await crud.set_pending_notification(session, user.id, [1], {"1": {}}, summary_message_id=1001)
+
+        async with session_scope_fixture() as session:
+            message_id = await crud.get_pending_message_id(session, user.id)
+            assert message_id == 1001
+
+        # повторная находка обновляет message_id (например, edit не удался
+        # и пришлось отправить новое сообщение)
+        async with session_scope_fixture() as session:
+            await crud.set_pending_notification(session, user.id, [1, 2], {"1": {}, "2": {}}, summary_message_id=1002)
+
+        async with session_scope_fixture() as session:
+            message_id = await crud.get_pending_message_id(session, user.id)
+            assert message_id == 1002
+
+    async def test_message_id_none_when_no_pending(self, session_scope_fixture):
+        async with session_scope_fixture() as session:
+            user = await crud.get_or_create_user(session, telegram_id=10, username=None, first_name=None)
+            assert await crud.get_pending_message_id(session, user.id) is None
 
 
 class TestGetOrCreateUser:

@@ -10,7 +10,7 @@ listings и favorites уже описаны здесь, чтобы не пере
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -29,6 +29,22 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+def _utcnow() -> datetime:
+    """Клиентская (Python) генерация времени вместо server_default=func.now()
+    — важно именно для Listing.parsed_at, который сравнивается с
+    last_checked_at (см. database/crud.py: get_new_listings_since,
+    utils.helpers.utcnow — тот же по смыслу хелпер, но продублирован
+    здесь напрямую, а не импортирован: utils.helpers сам импортирует из
+    database.models, импорт в обратную сторону создал бы циклическую
+    зависимость). У SQLite CURRENT_TIMESTAMP/func.now() точность —  целые
+    секунды, у Python datetime.now() — микросекунды. При server_default
+    объявление, вставленное в базу в ТУ ЖЕ секунду, что и обновление
+    last_checked_at, могло получить более раннее по факту сравнения
+    время и ошибочно не засчитаться как "новое" в уведомлениях — реальный
+    баг, пойманный тестом на редактирование уведомлений."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------
@@ -181,7 +197,7 @@ class Listing(Base):
     image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    parsed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    parsed_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     __table_args__ = (UniqueConstraint("external_id", "source"),)
@@ -238,4 +254,12 @@ class PendingNotification(Base):
     )
     listing_ids_json: Mapped[str] = mapped_column(Text)
     explanations_json: Mapped[str] = mapped_column(Text)
+    # ID сообщения-сводки в Telegram ("Нашёл N — показать?"), если уже
+    # отправлялось. Нужен, чтобы следующая находка РЕДАКТИРОВАЛА то же
+    # сообщение вместо отправки нового — иначе за день накапливался бы
+    # десяток отдельных уведомлений подряд (выглядит как мусор в чате), и
+    # каждое новое сообщение отдельно пинговало бы пользователя звуком —
+    # а редактирование существующего сообщения в Telegram проходит тихо,
+    # без повторного уведомления на телефоне.
+    summary_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

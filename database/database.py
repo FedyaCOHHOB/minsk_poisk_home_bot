@@ -50,9 +50,30 @@ def make_session_factory(engine) -> async_sessionmaker[AsyncSession]:
 
 async def init_db(engine) -> None:
     """Создаёт таблицы, если их ещё нет. Для MVP без Alembic-миграций —
-    при изменении схемы модели нужно будет пересоздать файл БД."""
+    при изменении схемы модели нужно будет пересоздать файл БД. Исключение —
+    точечные добавления колонок в уже существующие таблицы (см.
+    _ensure_pending_notification_columns): просить пересоздавать всю базу
+    ради одной новой колонки, когда там уже есть реальные анкеты и
+    избранное, было бы нечестно по отношению к тем, кто уже пользуется
+    ботом."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_pending_notification_columns(conn)
+
+
+async def _ensure_pending_notification_columns(conn) -> None:
+    """Лёгкая точечная миграция без полноценного Alembic — на масштабе
+    MVP это было бы избыточно, но и заставлять пользователя вручную
+    удалять файл БД при каждом изменении схемы — тоже плохо. Проверяем,
+    есть ли уже нужная колонка, добавляем через ALTER TABLE, если нет.
+    Безопасно вызывать многократно — на новых базах колонка уже будет
+    создана через create_all, и эта функция просто ничего не сделает."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(pending_notifications)")
+    columns = {row[1] for row in result.fetchall()}
+    if "summary_message_id" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE pending_notifications ADD COLUMN summary_message_id INTEGER"
+        )
 
 
 @asynccontextmanager
