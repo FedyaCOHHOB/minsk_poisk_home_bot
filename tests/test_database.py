@@ -53,3 +53,37 @@ class TestPendingNotificationMigration:
         assert "summary_message_id" in columns
 
         await engine.dispose()
+
+
+class TestNotificationSubscriptionMigration:
+    """Аналогично PendingNotification.summary_message_id — колонка
+    last_notified_at появилась позже, у уже существующих подписок её
+    может не быть в таблице. Проверяем, что миграция добавляет её, не
+    заставляя удалять bot.db."""
+
+    async def test_column_added_to_preexisting_table(self, tmp_path):
+        db_path = tmp_path / "old_subs_schema.db"
+        engine = make_engine(str(db_path))
+
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "CREATE TABLE notification_subscriptions ("
+                "id INTEGER PRIMARY KEY, user_id INTEGER, "
+                "min_score INTEGER, is_active BOOLEAN, "
+                "last_checked_at DATETIME, created_at DATETIME"
+                ")"
+            ))
+
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql("PRAGMA table_info(notification_subscriptions)")
+            columns_before = {row[1] for row in result.fetchall()}
+        assert "last_notified_at" not in columns_before
+
+        await init_db(engine)
+
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql("PRAGMA table_info(notification_subscriptions)")
+            columns_after = {row[1] for row in result.fetchall()}
+        assert "last_notified_at" in columns_after
+
+        await engine.dispose()

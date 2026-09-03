@@ -231,6 +231,15 @@ class NotificationSubscription(Base):
     min_score: Mapped[int] = mapped_column(Integer, default=70)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_checked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Отдельно от last_checked_at (тот двигается на КАЖДОМ цикле проверки).
+    # Этот — только когда пользователю реально ушло сообщение, которое его
+    # пингует (новое send, не edit). Нужен для NOTIFY_COOLDOWN_MINUTES в
+    # services/notifications.py: если пользователь быстро отвечает на
+    # уведомления, а у Kufar высокая ротация, "редактировать вместо
+    # отправки нового" не спасает — каждый цикл честно находит что-то
+    # новое и после ответа пользователя шлёт новое сообщение снова, что
+    # по ощущениям всё равно похоже на спам, даже если формально не дубли.
+    last_notified_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

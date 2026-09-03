@@ -59,6 +59,7 @@ async def init_db(engine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_pending_notification_columns(conn)
+        await _ensure_notification_subscription_columns(conn)
 
 
 async def _ensure_pending_notification_columns(conn) -> None:
@@ -73,6 +74,21 @@ async def _ensure_pending_notification_columns(conn) -> None:
     if "summary_message_id" not in columns:
         await conn.exec_driver_sql(
             "ALTER TABLE pending_notifications ADD COLUMN summary_message_id INTEGER"
+        )
+
+
+async def _ensure_notification_subscription_columns(conn) -> None:
+    """Тот же приём, что и выше, для last_notified_at (см. NotificationSubscription).
+    DEFAULT в самом ALTER — намеренно далёкая дата в прошлом: для уже
+    существующих подписок первый цикл после миграции не должен ждать
+    NOTIFY_COOLDOWN_MINUTES зря — они и так уже получали уведомления
+    раньше, искусственная задержка ничего не даёт, только раздражает."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(notification_subscriptions)")
+    columns = {row[1] for row in result.fetchall()}
+    if "last_notified_at" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE notification_subscriptions ADD COLUMN last_notified_at DATETIME "
+            "DEFAULT '1970-01-01 00:00:00'"
         )
 
 

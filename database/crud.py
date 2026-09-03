@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -276,7 +276,15 @@ async def set_subscription_active(
 ) -> NotificationSubscription:
     sub = await get_subscription(session, user_id)
     if sub is None:
-        sub = NotificationSubscription(user_id=user_id, is_active=active, last_checked_at=utcnow())
+        sub = NotificationSubscription(
+            user_id=user_id,
+            is_active=active,
+            last_checked_at=utcnow(),
+            # Далеко в прошлом — чтобы первое же уведомление после
+            # подписки не ждало NOTIFY_COOLDOWN_MINUTES зря (см.
+            # services/notifications.py).
+            last_notified_at=utcnow() - timedelta(days=1),
+        )
         session.add(sub)
     else:
         sub.is_active = active
@@ -284,6 +292,7 @@ async def set_subscription_active(
             # Включили заново — не шлём разом всё, что накопилось, пока было
             # выключено. Считаем "новым" только то, что появится с этого момента.
             sub.last_checked_at = utcnow()
+            sub.last_notified_at = utcnow() - timedelta(days=1)
     await session.flush()
     return sub
 
@@ -302,6 +311,19 @@ async def update_subscription_checked(
         update(NotificationSubscription)
         .where(NotificationSubscription.id == subscription_id)
         .values(last_checked_at=checked_at)
+    )
+
+
+async def update_subscription_notified(
+    session: AsyncSession, subscription_id: int, notified_at
+) -> None:
+    """Отдельно от update_subscription_checked — этот двигается только
+    когда пользователю реально ушло НОВОЕ сообщение (не редактирование
+    существующего), см. NOTIFY_COOLDOWN_MINUTES в services/notifications.py."""
+    await session.execute(
+        update(NotificationSubscription)
+        .where(NotificationSubscription.id == subscription_id)
+        .values(last_notified_at=notified_at)
     )
 
 
