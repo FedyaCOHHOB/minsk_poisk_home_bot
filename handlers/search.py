@@ -300,7 +300,6 @@ async def _show_card(
     index: int = data["index"]
     listing_id = listing_ids[index]
     old_message_id = data.get("card_message_id")
-    explanation = data.get("explanations", {}).get(str(listing_id))
 
     async with session_scope(session_factory) as session:
         listing = await crud.get_listing(session, listing_id)
@@ -308,7 +307,7 @@ async def _show_card(
             session, telegram_id=chat_id, username=None, first_name=None
         )
         favorited = await crud.is_favorited(session, user.id, listing_id)
-        text = format_listing_card(listing, explanation, position=(index + 1, len(listing_ids)))
+        text = format_listing_card(listing, position=(index + 1, len(listing_ids)))
         kb = listing_card_kb(
             has_prev=index > 0,
             has_next=index < len(listing_ids) - 1,

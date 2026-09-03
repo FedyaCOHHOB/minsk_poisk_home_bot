@@ -34,14 +34,8 @@ def _freshness_label(parsed_at) -> str:
 
 def format_listing_card(
     listing: Listing,
-    explanation: dict | None = None,
     position: tuple[int, int] | None = None,
 ) -> str:
-    """explanation — словарь из MatchExplanation.to_dict() (services/matching.py).
-    None — карточка без раздела score (например, в «Сохранённых»: там
-    показывать процент соответствия к профилю, который мог с тех пор
-    поменяться или вовсе не существовать при быстром поиске, не имеет
-    смысла — см. handlers/search.py)."""
     price_usd = price_to_usd(listing)
 
     if listing.price is None:
@@ -70,29 +64,8 @@ def format_listing_card(
     if listing.parsed_at:
         lines.append(f"🕐 Заметили у себя: {_freshness_label(listing.parsed_at)}")
 
-    if explanation is not None:
-        lines.append(f"\n⭐ Подходит вам: {explanation['score']}%")
-        lines.append(_checklist_line(listing, explanation) + "\n")
-    else:
-        lines.append("")
-
+    lines.append("")
     if description:
         lines.append(description)
 
     return "\n".join(lines)
-
-
-def _checklist_line(listing: Listing, explanation: dict) -> str:
-    items = [
-        "✅ Бюджет" if explanation["budget_ok"] else "⚠️ Бюджет не указан",
-        "✅ Район" if explanation["district_ok"] else "⚠️ Район не уточнён",
-    ]
-    # "Пол соседей" неприменим к квартире (там не подселяются к соседям —
-    # см. services/matching.py) — показывать его там нечего, поле и так
-    # всегда ✅ автоматически, это не сигнал, а шум.
-    if listing.housing_type != "apartment":
-        items.append(
-            "✅ Пол соседей" if explanation["roommate_gender_ok"] else "⚠️ Пол соседей не уточнён"
-        )
-    items.append("✅ Тип жилья" if explanation["housing_type_ok"] else "⚠️ Тип жилья не уточнён")
-    return " · ".join(items)
