@@ -26,20 +26,20 @@
    нажимает.
 
    Если предыдущая находка ещё не получила ответа (пользователь не нажал
-   ни "Показать", ни "Не сейчас") — новая находка РЕДАКТИРУЕТ то же самое
-   сообщение, а не отправляет новое. Это решает часть проблемы со спамом
-   уведомлениями, но не всю: если пользователь отвечает быстро (сводка
-   каждый раз обнуляется), а у Kufar высокая ротация объявлений, каждый
-   цикл честно находит что-то новое — и без дополнительного ограничения
-   всё равно слал бы новое сообщение каждые CHECK_INTERVAL_MINUTES. Для
-   этого — отдельный NOTIFY_COOLDOWN_MINUTES: реальная отправка НОВОГО
-   сообщения (которое пингует пользователя) не чаще раза в час, даже если
-   находки продолжают появляться. Пока пользователь ждёт кулдаун — находки
-   тихо копятся (PendingNotification без summary_message_id, то есть ещё
-   не отправлено), и как только кулдаун проходит, уходит ОДНО сообщение
-   сразу со всем накопленным. Обновление уже отправленного сообщения
-   (edit) кулдауном не ограничено — оно не пингует пользователя повторно,
-   ограничивать нечего.
+   ни "Показать", ни "Не сейчас") — новая находка не плодит второе
+   сообщение: старое УДАЛЯЕТСЯ, новое (с актуальным счётчиком) ОТПРАВЛЯЕТСЯ
+   вместо него. Раньше здесь была попытка редактировать сообщение на месте
+   — оказалась ненадёжной на практике, поэтому вместо неё используется тот
+   же простой и уже проверенный паттерн "удалить старое + отправить
+   новое", что и в handlers/search.py (_show_card).
+
+   И то, и другое (первая отправка, замена старого на новое) — реальный
+   пинг пользователю, поэтому оба варианта ограничены NOTIFY_COOLDOWN_MINUTES:
+   не чаще раза в час, даже если находки продолжают появляться. Пока
+   пользователь ждёт кулдаун — находки тихо копятся в PendingNotification
+   (summary_message_id остаётся тем, что было — экран пользователя не
+   трогаем вообще), и как только кулдаун проходит, уходит одно новое
+   сообщение сразу со всем накопленным.
 
 ТИХИЕ ЧАСЫ: весь цикл целиком пропускается с 23:00 до 08:00 по Минску —
 включая сам поход в Kufar (незачем тратить запросы ночью, если разослать
@@ -69,10 +69,9 @@ from utils.helpers import utcnow
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_MINUTES = 20
-# Минимальный промежуток между РЕАЛЬНЫМИ пингами (новыми отправленными
-# сообщениями) одному пользователю — независимо от того, сколько раз за
-# это время цикл нашёл что-то новое. Обновление уже отправленного
-# сообщения (edit) сюда не относится — оно не пингует повторно.
+# Минимальный промежуток между РЕАЛЬНЫМИ пингами (отправленными
+# сообщениями, включая замену старого на новое) одному пользователю —
+# независимо от того, сколько раз за это время цикл нашёл что-то новое.
 NOTIFY_COOLDOWN_MINUTES = 60
 # Потолок на размер одного списка находок за цикл — не защита от спама
 # сообщениями (сообщение всегда одно, сводка), а просто разумный лимит,
@@ -145,7 +144,6 @@ async def _check_one_subscription(
     old_message_id: int | None = None
     combined_listing_ids: list[int] = []
     combined_explanations: dict[str, dict] = {}
-    found_anything_new = False
 
     async with session_scope(session_factory) as session:
         profile = await crud.get_profile_by_user_id(session, user_id)
@@ -183,8 +181,6 @@ async def _check_one_subscription(
             if explanation.score >= min_score:
                 scored.append((listing, explanation))
 
-        found_anything_new = bool(scored)
-
         new_ids = [listing.id for listing, _ in scored]
         new_explanations = {str(listing.id): exp.to_dict() for listing, exp in scored}
 
@@ -214,73 +210,46 @@ async def _check_one_subscription(
         # Нечего показывать вообще — ни нового, ни накопленного раньше.
         return
 
+    cooldown_elapsed = (utcnow() - last_notified_at) >= timedelta(minutes=NOTIFY_COOLDOWN_MINUTES)
+
+    if not cooldown_elapsed:
+        # Копим молча — не трогаем экран пользователя вообще, пока не
+        # разрешит кулдаун. Если старое сообщение уже было — оно просто
+        # какое-то время показывает устаревший счётчик, это не страшно:
+        # как только кулдаун пройдёт, оно будет заменено актуальным.
+        async with session_scope(session_factory) as session:
+            await crud.set_pending_notification(
+                session, user_id, combined_listing_ids, combined_explanations, old_message_id
+            )
+        return
+
+    # Кулдаун прошёл — показываем актуальную сводку. Простой и надёжный
+    # путь: если старое сообщение было — удаляем его, затем отправляем
+    # новое. Никакого редактирования на месте — не полагаемся на то, что
+    # edit_message_text сработает во всех случаях одинаково надёжно.
+    if old_message_id is not None:
+        try:
+            await bot.delete_message(chat_id=telegram_id, message_id=old_message_id)
+        except TelegramBadRequest:
+            pass  # уже удалено пользователем/устарело — не критично
+
     count = len(combined_listing_ids)
     text = f"🔔 Нашёл для тебя {count} {_plural_variants(count)} — показать?"
     kb = _confirm_kb()
 
-    new_message_id: int | None = None
-    should_persist = False
-
-    if old_message_id is not None and found_anything_new:
-        # Уже отправляли сообщение по текущей неотвеченной находке, и
-        # появилось что-то новое — обновляем счётчик тихо (edit не пингует
-        # пользователя повторно), кулдаун здесь ни при чём.
-        try:
-            await bot.edit_message_text(
-                chat_id=telegram_id, message_id=old_message_id, text=text, reply_markup=kb
-            )
-            new_message_id = old_message_id
-            should_persist = True
-        except TelegramForbiddenError:
-            logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
-            async with session_scope(session_factory) as session:
-                await crud.set_subscription_active(session, user_id, False)
-            return
-        except TelegramBadRequest as exc:
-            # Сообщение могли удалить вручную и т.п. — считаем, что
-            # отправленного сообщения больше нет, попробуем отправить новое
-            # ниже (через общую ветку "old_message_id is None").
-            logger.info(
-                "Не удалось отредактировать уведомление %s (%s), отправлю новое",
-                old_message_id, exc,
-            )
-            old_message_id = None
-
-    if old_message_id is not None and not found_anything_new:
-        # Ничего нового в этот раз — сообщение и так отражает правильный
-        # счётчик, трогать нечего.
-        new_message_id = old_message_id
-        should_persist = False
-
-    if old_message_id is None:
-        # Либо сообщения ещё не было, либо было, но не удалось
-        # отредактировать (см. выше). В обоих случаях речь о НОВОМ
-        # сообщении, которое реально пингует пользователя — вот здесь и
-        # действует кулдаун.
-        cooldown_elapsed = (utcnow() - last_notified_at) >= timedelta(minutes=NOTIFY_COOLDOWN_MINUTES)
-        if cooldown_elapsed:
-            try:
-                sent = await bot.send_message(telegram_id, text, reply_markup=kb)
-                new_message_id = sent.message_id
-                should_persist = True
-                async with session_scope(session_factory) as session:
-                    await crud.update_subscription_notified(session, subscription_id, utcnow())
-            except TelegramForbiddenError:
-                logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
-                async with session_scope(session_factory) as session:
-                    await crud.set_subscription_active(session, user_id, False)
-                return
-            except TelegramBadRequest as exc:
-                logger.warning("Не удалось отправить уведомление %s: %s", telegram_id, exc)
-                return
-        else:
-            # Кулдаун ещё не прошёл — копим молча (summary_message_id
-            # остаётся None), пользователя пока не трогаем.
-            new_message_id = None
-            should_persist = True
-
-    if should_persist:
+    try:
+        sent = await bot.send_message(telegram_id, text, reply_markup=kb)
+    except TelegramForbiddenError:
+        logger.info("Пользователь %s заблокировал бота — отключаю его подписку", telegram_id)
         async with session_scope(session_factory) as session:
-            await crud.set_pending_notification(
-                session, user_id, combined_listing_ids, combined_explanations, new_message_id
-            )
+            await crud.set_subscription_active(session, user_id, False)
+        return
+    except TelegramBadRequest as exc:
+        logger.warning("Не удалось отправить уведомление %s: %s", telegram_id, exc)
+        return
+
+    async with session_scope(session_factory) as session:
+        await crud.update_subscription_notified(session, subscription_id, utcnow())
+        await crud.set_pending_notification(
+            session, user_id, combined_listing_ids, combined_explanations, sent.message_id
+        )

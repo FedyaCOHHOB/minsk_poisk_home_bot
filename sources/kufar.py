@@ -302,3 +302,30 @@ class KufarSource(BaseListingSource):
     def _absolute_url(href: str) -> str:
         return href if href.startswith("http") else f"{BASE_HOST}{href}"
 
+    async def fetch_photos(self, listing_url: str, limit: int = 5) -> list[str]:
+        """Дополнительные фото со страницы КОНКРЕТНОГО объявления — на
+        странице поиска есть только одна превью-картинка на карточку. Вызывается
+        лениво (только когда карточка реально показывается пользователю в
+        handlers/search.py), а не при каждом поиске — иначе на 30 найденных
+        объявлений уходило бы 30 лишних запросов к Kufar сразу, что
+        противоречит принципу "не долбить сайт часто" (см. докстринг модуля).
+        Лучшее приближение: собираю все картинки с домена content.kufar.by
+        на странице — точную структуру галереи вживую не проверял (сеть до
+        Kufar недоступна в моей песочнице), пробуй и присылай, если пусто
+        или мусор."""
+        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout) as client:
+            html = await self._get_with_retry(client, listing_url)
+        if html is None:
+            return []
+        soup = BeautifulSoup(html, "lxml")
+        urls: list[str] = []
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if not src or "content.kufar.by" not in src:
+                continue
+            if src not in urls:
+                urls.append(src)
+            if len(urls) >= limit:
+                break
+        return urls
+

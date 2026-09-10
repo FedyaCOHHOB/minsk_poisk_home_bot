@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import crud
@@ -23,6 +23,7 @@ from keyboards.inline import (
 from keyboards.main import BTN_FAVORITES, BTN_SEARCH, main_menu_kb
 from services.formatting import format_listing_card
 from services.listings import search_and_store
+from sources.kufar import KufarSource
 from services.matching import QuickProfile, explain_match, match_listing
 from states.quick_search import QuickSearchForm
 from states.search import SearchSession
@@ -315,24 +316,49 @@ async def _show_card(
             listing_url=listing.url,
         )
         image_url = listing.image_url
+        listing_url = listing.url
 
     if old_message_id:
-        try:
-            await bot.delete_message(chat_id, old_message_id)
-        except TelegramBadRequest:
-            pass  # сообщение уже удалено/устарело — не критично
+        ids = old_message_id if isinstance(old_message_id, list) else [old_message_id]
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id, mid)
+            except TelegramBadRequest:
+                pass  # сообщение уже удалено/устарело — не критично
 
-    sent = None
+    photo_urls: list[str] = []
     if image_url:
         try:
-            sent = await bot.send_photo(chat_id, photo=image_url, caption=text, reply_markup=kb)
+            extra = await KufarSource().fetch_photos(listing_url)
+            photo_urls = extra if extra else [image_url]
+        except Exception as exc:
+            logger.warning("Не удалось получить доп. фото для %s (%s)", listing_url, exc)
+            photo_urls = [image_url]
+
+    sent_ids: list[int] = []
+    if len(photo_urls) >= 2:
+        media = [InputMediaPhoto(media=u) for u in photo_urls[:5]]
+        try:
+            msgs = await bot.send_media_group(chat_id, media=media)
+            sent_ids = [m.message_id for m in msgs]
+            btn_msg = await bot.send_message(chat_id, text, reply_markup=kb)
+            sent_ids.append(btn_msg.message_id)
         except TelegramBadRequest as exc:
-            logger.warning("Не удалось отправить фото %s (%s), отправляю текстом", image_url, exc)
+            logger.warning("Не удалось отправить альбом фото (%s), пробую одним фото", exc)
+            photo_urls = photo_urls[:1]
 
-    if sent is None:
-        sent = await bot.send_message(chat_id, text, reply_markup=kb)
+    if not sent_ids:
+        if photo_urls:
+            try:
+                sent = await bot.send_photo(chat_id, photo=photo_urls[0], caption=text, reply_markup=kb)
+                sent_ids = [sent.message_id]
+            except TelegramBadRequest as exc:
+                logger.warning("Не удалось отправить фото %s (%s), отправляю текстом", photo_urls[0], exc)
+        if not sent_ids:
+            sent = await bot.send_message(chat_id, text, reply_markup=kb)
+            sent_ids = [sent.message_id]
 
-    await state.update_data(card_message_id=sent.message_id)
+    await state.update_data(card_message_id=sent_ids)
 
 
 @router.callback_query(SearchSession.browsing, F.data == "card:next")

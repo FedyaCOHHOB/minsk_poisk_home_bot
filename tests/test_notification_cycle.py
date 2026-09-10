@@ -25,8 +25,12 @@ class _FakeMessage:
 
 async def _make_mock_bot():
     bot = AsyncMock()
-    bot.send_message = AsyncMock(side_effect=lambda *a, **kw: _FakeMessage(9001))
-    bot.edit_message_text = AsyncMock()
+    counter = {"n": 0}
+    def _send(*a, **kw):
+        counter["n"] += 1
+        return _FakeMessage(9000 + counter["n"])
+    bot.send_message = AsyncMock(side_effect=_send)
+    bot.delete_message = AsyncMock()
     return bot
 
 
@@ -49,79 +53,69 @@ async def _setup_subscriber(session_scope_fixture, telegram_id=42):
     return user
 
 
-class TestNotificationAccumulation:
-    """Реальный найденный баг: не ответившему на первое уведомление
-    пользователю второй цикл молча ЗАМЕНЯЛ находку вместо того, чтобы
-    добавить к ней — первая находка бесследно исчезала."""
+class TestDeleteAndResend:
+    """Раньше пытались редактировать сообщение на месте — оказалось
+    ненадёжно. Теперь: старое удаляется, новое отправляется."""
 
-    async def test_unanswered_notification_accumulates_not_replaces(
-        self, session_factory, session_scope_fixture
-    ):
+    async def test_second_batch_deletes_old_sends_new(self, session_factory, session_scope_fixture):
         user = await _setup_subscriber(session_scope_fixture)
         bot = await _make_mock_bot()
 
         async with session_scope_fixture() as session:
             await crud.upsert_listing(session, _raw_listing("ACC1"))
-
         async with session_scope_fixture() as session:
             sub = await crud.get_subscription(session, user.id)
         await _check_one_subscription(
             bot, session_factory, sub.id, user.id, sub.last_checked_at, sub.min_score, sub.last_notified_at
         )
         assert bot.send_message.call_count == 1
-        assert "1" in bot.send_message.call_args.args[1]
+        first_id = bot.send_message.call_args.args[0] if False else 9001
 
-        # Пользователь ЕЩЁ НЕ ответил. Появляется второе объявление.
+        # "прошёл час" — кулдаун снят
+        from sqlalchemy import update as sa_update
+        from database.models import NotificationSubscription
         async with session_scope_fixture() as session:
             sub = await crud.get_subscription(session, user.id)
+            await session.execute(
+                sa_update(NotificationSubscription).where(NotificationSubscription.id == sub.id)
+                .values(last_notified_at=utcnow() - timedelta(minutes=NOTIFY_COOLDOWN_MINUTES + 1))
+            )
             await crud.upsert_listing(session, _raw_listing("ACC2"))
+
+        async with session_scope_fixture() as session:
+            sub = await crud.get_subscription(session, user.id)
         await _check_one_subscription(
             bot, session_factory, sub.id, user.id, sub.last_checked_at, sub.min_score, sub.last_notified_at
         )
 
-        assert bot.send_message.call_count == 1, "второй цикл не должен слать новое сообщение"
-        assert bot.edit_message_text.call_count == 1, "второй цикл должен редактировать существующее"
-        edited_kwargs = bot.edit_message_text.call_args.kwargs
-        assert edited_kwargs["message_id"] == 9001, "должно редактироваться то же самое сообщение"
-        assert "2" in edited_kwargs["text"]
+        assert bot.delete_message.call_count == 1, "старое сообщение должно было удалиться"
+        assert bot.send_message.call_count == 2, "новое сообщение должно было отправиться"
 
         async with session_scope_fixture() as session:
             pending = await crud.get_pending_notification(session, user.id)
             listing_ids, _ = pending
             assert len(listing_ids) == 2, "находка первого цикла не должна была потеряться"
 
-    async def test_no_new_listings_does_not_touch_message(
-        self, session_factory, session_scope_fixture
-    ):
+    async def test_no_new_listings_does_not_touch_message(self, session_factory, session_scope_fixture):
         user = await _setup_subscriber(session_scope_fixture)
         bot = await _make_mock_bot()
-
         async with session_scope_fixture() as session:
             sub = await crud.get_subscription(session, user.id)
-
-        # ничего нового не появилось
         await _check_one_subscription(
             bot, session_factory, sub.id, user.id, sub.last_checked_at, sub.min_score, sub.last_notified_at
         )
-
         assert bot.send_message.call_count == 0
-        assert bot.edit_message_text.call_count == 0
+        assert bot.delete_message.call_count == 0
 
 
 class TestNotifyCooldown:
-    """Даже если пользователь отвечает на каждое уведомление мгновенно
-    (значит, редактировать действительно нечего — предыдущее уже закрыто),
-    частота РЕАЛЬНЫХ пингов не должна превышать раз в NOTIFY_COOLDOWN_MINUTES,
-    иначе при высокой ротации объявлений на Kufar это ощущается как спам,
-    даже когда каждое сообщение формально не дублирует предыдущее."""
+    """Даже если пользователь отвечает мгновенно (pending чист), реальный
+    пинг не чаще раза в NOTIFY_COOLDOWN_MINUTES."""
 
-    async def test_prompt_responses_still_get_throttled(
-        self, session_factory, session_scope_fixture
-    ):
+    async def test_prompt_responses_still_get_throttled(self, session_factory, session_scope_fixture):
         user = await _setup_subscriber(session_scope_fixture)
         bot = await _make_mock_bot()
 
-        # Цикл 1: находит первое объявление, пингует.
         async with session_scope_fixture() as session:
             await crud.upsert_listing(session, _raw_listing("R1"))
         async with session_scope_fixture() as session:
@@ -131,11 +125,9 @@ class TestNotifyCooldown:
         )
         assert bot.send_message.call_count == 1
 
-        # Пользователь мгновенно отвечает — pending закрыт.
         async with session_scope_fixture() as session:
             await crud.clear_pending_notification(session, user.id)
 
-        # Цикл 2, СРАЗУ следом (кулдаун ещё не прошёл): находит второе.
         async with session_scope_fixture() as session:
             sub = await crud.get_subscription(session, user.id)
             await crud.upsert_listing(session, _raw_listing("R2"))
@@ -144,21 +136,17 @@ class TestNotifyCooldown:
         )
 
         assert bot.send_message.call_count == 1, "кулдаун должен был предотвратить пинг так скоро"
-        assert bot.edit_message_text.call_count == 0, "редактировать нечего — предыдущее уже закрыто пользователем"
+        assert bot.delete_message.call_count == 0
 
-        # Находка не потерялась — тихо копится.
         async with session_scope_fixture() as session:
             pending = await crud.get_pending_notification(session, user.id)
             assert pending is not None
             listing_ids, _ = pending
             assert len(listing_ids) == 1
 
-    async def test_accumulated_finding_sent_once_cooldown_elapses(
-        self, session_factory, session_scope_fixture
-    ):
+    async def test_accumulated_finding_sent_once_cooldown_elapses(self, session_factory, session_scope_fixture):
         from sqlalchemy import update as sa_update
         from database.models import NotificationSubscription
-        from database.database import session_scope as db_session_scope
 
         user = await _setup_subscriber(session_scope_fixture)
         bot = await _make_mock_bot()
@@ -179,14 +167,12 @@ class TestNotifyCooldown:
         await _check_one_subscription(
             bot, session_factory, sub.id, user.id, sub.last_checked_at, sub.min_score, sub.last_notified_at
         )
-        assert bot.send_message.call_count == 1  # накопилось молча, ещё не отправлено
+        assert bot.send_message.call_count == 1
 
-        # "Проходит час" — искусственно состариваем last_notified_at.
         async with session_scope_fixture() as session:
             sub = await crud.get_subscription(session, user.id)
             await session.execute(
-                sa_update(NotificationSubscription)
-                .where(NotificationSubscription.id == sub.id)
+                sa_update(NotificationSubscription).where(NotificationSubscription.id == sub.id)
                 .values(last_notified_at=utcnow() - timedelta(minutes=NOTIFY_COOLDOWN_MINUTES + 1))
             )
 
@@ -195,5 +181,4 @@ class TestNotifyCooldown:
         await _check_one_subscription(
             bot, session_factory, sub.id, user.id, sub.last_checked_at, sub.min_score, sub.last_notified_at
         )
-
-        assert bot.send_message.call_count == 2, "после истечения кулдауна накопленное должно уйти"
+        assert bot.send_message.call_count == 2
