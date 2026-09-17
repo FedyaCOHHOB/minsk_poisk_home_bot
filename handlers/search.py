@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InputMediaPhoto, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InputMediaPhoto, Message
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import crud
@@ -326,6 +326,12 @@ async def _show_card(
             except TelegramBadRequest:
                 pass  # сообщение уже удалено/устарело — не критично
 
+    # Собираем список URL кандидатов на фото (превью +, если получится,
+    # вся галерея объявления), а затем СКАЧИВАЕМ их сами и грузим в
+    # Telegram уже готовым файлом, а не голой ссылкой (см. докстринг
+    # KufarSource.download_photos в sources/kufar.py — реальный найденный
+    # баг: Telegram не мог сам вытянуть картинку с нового CDN Kufar по
+    # прямой ссылке, из-за чего карточки приходили вообще без фото).
     photo_urls: list[str] = []
     if image_url:
         try:
@@ -335,9 +341,19 @@ async def _show_card(
             logger.warning("Не удалось получить доп. фото для %s (%s)", listing_url, exc)
             photo_urls = [image_url]
 
+    photo_bytes: list[bytes] = []
+    if photo_urls:
+        try:
+            photo_bytes = await KufarSource().download_photos(photo_urls[:5])
+        except Exception as exc:
+            logger.warning("Не удалось скачать фото для %s (%s)", listing_url, exc)
+
     sent_ids: list[int] = []
-    if len(photo_urls) >= 2:
-        media = [InputMediaPhoto(media=u) for u in photo_urls[:5]]
+    if len(photo_bytes) >= 2:
+        media = [
+            InputMediaPhoto(media=BufferedInputFile(data_, filename=f"photo_{i}.jpg"))
+            for i, data_ in enumerate(photo_bytes)
+        ]
         try:
             msgs = await bot.send_media_group(chat_id, media=media)
             sent_ids = [m.message_id for m in msgs]
@@ -345,15 +361,20 @@ async def _show_card(
             sent_ids.append(btn_msg.message_id)
         except TelegramBadRequest as exc:
             logger.warning("Не удалось отправить альбом фото (%s), пробую одним фото", exc)
-            photo_urls = photo_urls[:1]
+            photo_bytes = photo_bytes[:1]
 
     if not sent_ids:
-        if photo_urls:
+        if photo_bytes:
             try:
-                sent = await bot.send_photo(chat_id, photo=photo_urls[0], caption=text, reply_markup=kb)
+                sent = await bot.send_photo(
+                    chat_id,
+                    photo=BufferedInputFile(photo_bytes[0], filename="photo.jpg"),
+                    caption=text,
+                    reply_markup=kb,
+                )
                 sent_ids = [sent.message_id]
             except TelegramBadRequest as exc:
-                logger.warning("Не удалось отправить фото %s (%s), отправляю текстом", photo_urls[0], exc)
+                logger.warning("Не удалось отправить фото (%s), отправляю текстом", exc)
         if not sent_ids:
             sent = await bot.send_message(chat_id, text, reply_markup=kb)
             sent_ids = [sent.message_id]

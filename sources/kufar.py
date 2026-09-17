@@ -65,6 +65,13 @@ DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
+# Домен служебной графики сайта (иконки, логотип, svg-калькулятор и т.п.) —
+# НЕ фото объявлений. Раньше здесь же (до смены CDN у Kufar) лежали и сами
+# фото объявлений, поэтому fetch_photos() исторически искал картинки ПО
+# этому домену — сейчас наоборот, используется, чтобы его исключить (см.
+# докстринг fetch_photos ниже — реальный найденный баг).
+STATIC_ASSET_DOMAIN = "content.kufar.by"
+
 # Все 9 подтверждены напрямую со страницы фильтров Kufar (блок "Район" на
 # /l/minsk/snyat/kvartiru), не только по паттерну транслитерации.
 DISTRICT_SLUGS: dict[District, str] = {
@@ -290,13 +297,32 @@ class KufarSource(BaseListingSource):
 
     @staticmethod
     def _extract_image(anchor) -> str | None:
-        img = anchor.find("img")
-        if img is None:
-            return None
-        src = img.get("src") or img.get("data-src")
-        if not src:
-            return None
-        return src if src.startswith("http") else f"{BASE_HOST}{src}"
+        """НАЙДЕННЫЙ БАГ (живой лог, не догадка): раньше бралась просто
+        ПЕРВАЯ <img> внутри карточки. Для объявлений с реальным фото это
+        не мешало — настоящее фото в разметке Kufar идёт первым. Но для
+        объявлений БЕЗ своего фото Kufar подставляет в то же место
+        плейсхолдер — логотип сайта (content.kufar.by/.../logo-small.svg),
+        и функция честно, но неправильно принимала его за фото объявления.
+        Итог был виден в логах: бот пытался отправить в Telegram именно
+        этот логотип как photo, Telegram закономерно отказывался
+        ("failed to get HTTP URL content" — SVG, не то, что ожидает photo).
+
+        Теперь перебираем ВСЕ <img> в карточке и берём первую, которая не
+        похожа на служебную графику сайта (тот же фильтр, что и в
+        fetch_photos: не с STATIC_ASSET_DOMAIN, не .svg). Если такой не
+        нашлось — значит у объявления реально нет своего фото, возвращаем
+        None: карточка честно уйдёт текстом, а не с логотипом Kufar вместо
+        фото квартиры."""
+        for img in anchor.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if not src:
+                continue
+            if STATIC_ASSET_DOMAIN in src:
+                continue  # логотип/иконка-плейсхолдер — не фото объявления
+            if src.lower().endswith(".svg"):
+                continue
+            return src if src.startswith("http") else f"{BASE_HOST}{src}"
+        return None
 
     @staticmethod
     def _absolute_url(href: str) -> str:
@@ -309,10 +335,19 @@ class KufarSource(BaseListingSource):
         handlers/search.py), а не при каждом поиске — иначе на 30 найденных
         объявлений уходило бы 30 лишних запросов к Kufar сразу, что
         противоречит принципу "не долбить сайт часто" (см. докстринг модуля).
-        Лучшее приближение: собираю все картинки с домена content.kufar.by
-        на странице — точную структуру галереи вживую не проверял (сеть до
-        Kufar недоступна в моей песочнице), пробуй и присылай, если пусто
-        или мусор."""
+
+        ИСПРАВЛЕНО (реальный найденный баг, подтверждён живым прогоном
+        пользователя, не догадкой): раньше фильтр собирал картинки с домена
+        content.kufar.by — это было верно, пока сам Kufar отдавал оттуда и
+        фото объявлений тоже. Сайт сменил CDN для фото объявлений на
+        rms.kufar.by, а content.kufar.by остался только под служебную
+        графику (иконки, логотип, svg-калькулятор). Из-за жёсткой привязки
+        к старому домену эта функция стабильно возвращала пустой список —
+        карусель фото пропадала полностью, всегда, не иногда. Теперь
+        наоборот: исключаем STATIC_ASSET_DOMAIN (это точно не фото
+        объявления) и .svg (доп. страховка на случай иконок не с этого
+        домена) — так переживёт и следующую смену CDN-поддомена, если она
+        случится, а не привяжется намертво к rms.kufar.by."""
         async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout) as client:
             html = await self._get_with_retry(client, listing_url)
         if html is None:
@@ -321,11 +356,51 @@ class KufarSource(BaseListingSource):
         urls: list[str] = []
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src")
-            if not src or "content.kufar.by" not in src:
+            if not src:
                 continue
+            if STATIC_ASSET_DOMAIN in src:
+                continue  # иконки/лого сайта — точно не фото объявления
+            if src.lower().endswith(".svg"):
+                continue  # доп. страховка на случай svg не с content.kufar.by
             if src not in urls:
                 urls.append(src)
             if len(urls) >= limit:
                 break
         return urls
 
+    async def download_photos(self, urls: list[str]) -> list[bytes]:
+        """Скачивает байты уже готовых URL (из fetch_photos() или из
+        image_url карточки) вместо того, чтобы отдавать сами ссылки
+        в Telegram напрямую.
+
+        НАЙДЕННЫЙ БАГ (вторая, более серьёзная часть жалобы "пропали
+        фото" — пропала не только карусель, а вообще любое фото, включая
+        одиночное превью): даже с рабочим fetch_photos() карточки
+        всё равно приходили совсем без фото. Значит дело не только в
+        домене — сам Telegram не мог скачать картинку по прямой ссылке на
+        rms.kufar.by (bot.send_photo(photo=url) падал с TelegramBadRequest,
+        это тихо ловилось в handlers/search.py и откатывалось на
+        обычный текст, без видимой ошибки пользователю). Похоже, новый CDN
+        Kufar не отдаёт картинки "стороннему" запросу так же охотно, как
+        старый content.kufar.by. Раз мы и так уже успешно скачиваем HTML
+        с доменов Kufar этими же заголовками — качаем ими же и байты фото,
+        и отдаём в Telegram уже готовым файлом (BufferedInputFile в
+        handlers/search.py), а не ссылкой — тогда неважно, что там за
+        защита от прямого хотлинка на стороне Kufar.
+
+        Параллельно (asyncio.gather), не по очереди — иначе на каждый
+        показ карточки уходило бы до 5 запросов один за другим, заметно
+        медленнее."""
+        async def _one(client: httpx.AsyncClient, url: str) -> bytes | None:
+            try:
+                response = await client.get(url)
+                if response.status_code == 200:
+                    return response.content
+                logger.warning("Фото %s ответило %s", url, response.status_code)
+            except httpx.HTTPError as exc:
+                logger.warning("Не удалось скачать фото %s (%s)", url, exc)
+            return None
+
+        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout) as client:
+            results = await asyncio.gather(*(_one(client, url) for url in urls))
+        return [data for data in results if data is not None]
