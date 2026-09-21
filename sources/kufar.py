@@ -158,7 +158,7 @@ class KufarSource(BaseListingSource):
         request_pairs = [(d, c) for d in targets for c in categories]
 
         async with httpx.AsyncClient(
-            headers=DEFAULT_HEADERS, timeout=self.timeout
+            headers=DEFAULT_HEADERS, timeout=self.timeout, follow_redirects=True
         ) as client:
             for i, (district, category) in enumerate(request_pairs):
                 if i > 0:
@@ -348,7 +348,9 @@ class KufarSource(BaseListingSource):
         объявления) и .svg (доп. страховка на случай иконок не с этого
         домена) — так переживёт и следующую смену CDN-поддомена, если она
         случится, а не привяжется намертво к rms.kufar.by."""
-        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout) as client:
+        async with httpx.AsyncClient(
+            headers=DEFAULT_HEADERS, timeout=self.timeout, follow_redirects=True
+        ) as client:
             html = await self._get_with_retry(client, listing_url)
         if html is None:
             return []
@@ -373,20 +375,19 @@ class KufarSource(BaseListingSource):
         image_url карточки) вместо того, чтобы отдавать сами ссылки
         в Telegram напрямую.
 
-        НАЙДЕННЫЙ БАГ (вторая, более серьёзная часть жалобы "пропали
-        фото" — пропала не только карусель, а вообще любое фото, включая
-        одиночное превью): даже с рабочим fetch_photos() карточки
-        всё равно приходили совсем без фото. Значит дело не только в
-        домене — сам Telegram не мог скачать картинку по прямой ссылке на
-        rms.kufar.by (bot.send_photo(photo=url) падал с TelegramBadRequest,
-        это тихо ловилось в handlers/search.py и откатывалось на
-        обычный текст, без видимой ошибки пользователю). Похоже, новый CDN
-        Kufar не отдаёт картинки "стороннему" запросу так же охотно, как
-        старый content.kufar.by. Раз мы и так уже успешно скачиваем HTML
-        с доменов Kufar этими же заголовками — качаем ими же и байты фото,
-        и отдаём в Telegram уже готовым файлом (BufferedInputFile в
-        handlers/search.py), а не ссылкой — тогда неважно, что там за
-        защита от прямого хотлинка на стороне Kufar.
+        НАЙДЕННЫЙ БАГ (подтверждён живым логом, не догадкой): даже с
+        рабочим fetch_photos() и верным доменом карточки всё равно
+        приходили совсем без фото, включая одиночное превью. По логу
+        видно точную причину: rms.kufar.by отвечает на запрос картинки
+        `302 Moved Temporarily` (редирект на настоящее расположение файла),
+        а `httpx.AsyncClient` по умолчанию НЕ идёт по редиректам сам
+        (`follow_redirects=False` из коробки) — код получал сам редирект,
+        видел не-200 и считал скачивание неудачным, до реальных байт
+        картинки просто не доходило. Раньше (на content.kufar.by) редиректа
+        не было, поэтому баг был не виден. Чинится одним параметром при
+        создании клиента — `follow_redirects=True` (см. ниже, и остальные
+        httpx.AsyncClient в этом файле — тем же параметром, на случай если
+        Kufar начнёт редиректить и другие свои эндпоинты).
 
         Параллельно (asyncio.gather), не по очереди — иначе на каждый
         показ карточки уходило бы до 5 запросов один за другим, заметно
@@ -401,6 +402,8 @@ class KufarSource(BaseListingSource):
                 logger.warning("Не удалось скачать фото %s (%s)", url, exc)
             return None
 
-        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout) as client:
+        async with httpx.AsyncClient(
+            headers=DEFAULT_HEADERS, timeout=self.timeout, follow_redirects=True
+        ) as client:
             results = await asyncio.gather(*(_one(client, url) for url in urls))
         return [data for data in results if data is not None]
