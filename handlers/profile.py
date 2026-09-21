@@ -13,6 +13,7 @@ from keyboards.inline import (
     districts_kb,
     gender_kb,
     housing_type_kb,
+    room_type_kb,
     roommate_gender_kb,
     skip_kb,
     yes_no_kb,
@@ -45,10 +46,9 @@ async def process_gender(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(gender=value)
     await state.set_state(ProfileForm.age)
 
-    await callback.message.edit_text(
-        f"Пол: {'Девушка' if value == 'female' else 'Мужчина'} ✅"
-    )
-    await callback.message.answer("Сколько тебе лет?")
+    label = "👩 Девушка" if value == "female" else "👨 Мужчина"
+    await callback.message.edit_text(f"Пол: {label} ✅")
+    await callback.message.answer("🎂 Сколько тебе лет?")
     await callback.answer()
 
 
@@ -65,7 +65,7 @@ async def process_age(message: Message, state: FSMContext) -> None:
 
     await state.update_data(age=age)
     await state.set_state(ProfileForm.budget)
-    await message.answer("Какой у тебя максимальный бюджет в долларах?")
+    await message.answer("💰 Какой у тебя максимальный бюджет в долларах?")
 
 
 # --------------------------------------------------------------------------
@@ -82,7 +82,7 @@ async def process_budget(message: Message, state: FSMContext) -> None:
     await state.update_data(budget=budget, selected_districts=[])
     await state.set_state(ProfileForm.districts)
     await message.answer(
-        "Выбери районы (можно несколько), затем нажми «Готово»:",
+        "📍 Выбери районы (можно несколько), затем нажми «Готово»:",
         reply_markup=districts_kb(set()),
     )
 
@@ -123,32 +123,68 @@ async def finish_districts(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     await state.set_state(ProfileForm.housing_type)
-    await callback.message.edit_text("Районы выбраны ✅")
-    await callback.message.answer("Что ты ищешь?", reply_markup=housing_type_kb())
+    await callback.message.edit_text("📍 Районы выбраны ✅")
+    await callback.message.answer(
+        "🏠 Квартиру целиком или комнату ищешь?", reply_markup=housing_type_kb()
+    )
     await callback.answer()
 
 
 # --------------------------------------------------------------------------
-# Тип жилья
+# Тип жилья — верхний уровень: квартира / комната / неважно (ровно как
+# категории на Kufar, см. докстринг housing_type_kb в keyboards/inline.py).
+# Если выбрали "комната" — это ПРОМЕЖУТОЧНЫЙ ответ, финальный housing_type
+# в данные анкеты пока не пишем, уходим на уточняющий шаг room_type.
 # --------------------------------------------------------------------------
 
 @router.callback_query(ProfileForm.housing_type, F.data.startswith("housing:"))
 async def process_housing_type(callback: CallbackQuery, state: FSMContext) -> None:
     value = callback.data.split(":", 1)[1]
+
+    if value == "room":
+        await callback.message.edit_text("🚪 Комнату ✅")
+        await state.set_state(ProfileForm.room_type)
+        await callback.message.answer(
+            "Комнату — свою целиком или с подселением?", reply_markup=room_type_kb()
+        )
+        await callback.answer()
+        return
+
     await state.update_data(housing_type=value)
-    await callback.message.edit_text("Тип жилья выбран ✅")
+    label = "🏢 Квартиру целиком" if value == "apartment" else "🤷 Неважно"
+    await callback.message.edit_text(f"{label} ✅")
 
     if value == "apartment":
         # При квартире вопрос "к кому подселиться" не имеет смысла — там
         # не подселяются к соседям, снимают жильё целиком.
         await state.update_data(roommate_gender=RoommateGender.ANY.value)
         await state.set_state(ProfileForm.pets)
-        await callback.message.answer("Есть животные?", reply_markup=yes_no_kb("pets"))
+        await callback.message.answer("🐾 Есть животные?", reply_markup=yes_no_kb("pets"))
     else:
         await state.set_state(ProfileForm.roommate_gender)
         await callback.message.answer(
-            "К кому готов(а) подселиться?", reply_markup=roommate_gender_kb()
+            "👥 К кому готов(а) подселиться?", reply_markup=roommate_gender_kb()
         )
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------
+# Уточнение типа комнаты — только если на предыдущем шаге выбрали "комната".
+# Здесь и пишется финальный housing_type ("room" | "sublet").
+# --------------------------------------------------------------------------
+
+@router.callback_query(ProfileForm.room_type, F.data.startswith("roomtype:"))
+async def process_room_type(callback: CallbackQuery, state: FSMContext) -> None:
+    value = callback.data.split(":", 1)[1]  # "room" | "sublet"
+    await state.update_data(housing_type=value)
+
+    label = "🛏 Своя комната" if value == "room" else "👥 Подселение / койко-место"
+    await callback.message.edit_text(f"{label} ✅")
+
+    await state.set_state(ProfileForm.roommate_gender)
+    await callback.message.answer(
+        "👥 К кому готов(а) подселиться?", reply_markup=roommate_gender_kb()
+    )
     await callback.answer()
 
 
@@ -162,8 +198,8 @@ async def process_roommate_gender(callback: CallbackQuery, state: FSMContext) ->
     await state.update_data(roommate_gender=value)
     await state.set_state(ProfileForm.pets)
 
-    await callback.message.edit_text("Записал ✅")
-    await callback.message.answer("Есть животные?", reply_markup=yes_no_kb("pets"))
+    await callback.message.edit_text("👥 Записал ✅")
+    await callback.message.answer("🐾 Есть животные?", reply_markup=yes_no_kb("pets"))
     await callback.answer()
 
 
@@ -177,8 +213,8 @@ async def process_pets(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(pets=value)
     await state.set_state(ProfileForm.smoking)
 
-    await callback.message.edit_text(f"Животные: {'да' if value else 'нет'} ✅")
-    await callback.message.answer("Куришь?", reply_markup=yes_no_kb("smoking"))
+    await callback.message.edit_text(f"🐾 Животные: {'да' if value else 'нет'} ✅")
+    await callback.message.answer("🚬 Куришь?", reply_markup=yes_no_kb("smoking"))
     await callback.answer()
 
 
@@ -188,9 +224,9 @@ async def process_smoking(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(smoking=value)
     await state.set_state(ProfileForm.bad_habits)
 
-    await callback.message.edit_text(f"Курение: {'да' if value else 'нет'} ✅")
+    await callback.message.edit_text(f"🚬 Курение: {'да' if value else 'нет'} ✅")
     await callback.message.answer(
-        "Есть другие вредные привычки?", reply_markup=yes_no_kb("bad_habits")
+        "⚠️ Есть другие вредные привычки?", reply_markup=yes_no_kb("bad_habits")
     )
     await callback.answer()
 
@@ -201,9 +237,9 @@ async def process_bad_habits(callback: CallbackQuery, state: FSMContext) -> None
     await state.update_data(bad_habits=value)
     await state.set_state(ProfileForm.occupation)
 
-    await callback.message.edit_text(f"Вредные привычки: {'да' if value else 'нет'} ✅")
+    await callback.message.edit_text(f"⚠️ Вредные привычки: {'да' if value else 'нет'} ✅")
     await callback.message.answer(
-        "Работаешь или учишься? Напиши коротко (или пропусти).",
+        "💼 Работаешь или учишься? Напиши коротко (или пропусти).",
         reply_markup=skip_kb("occupation"),
     )
     await callback.answer()
@@ -222,7 +258,7 @@ async def process_occupation_text(message: Message, state: FSMContext) -> None:
 @router.callback_query(ProfileForm.occupation, F.data == "skip:occupation")
 async def process_occupation_skip(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(occupation=None)
-    await callback.message.edit_text("Ок, пропускаем")
+    await callback.message.edit_text("⏭ Ок, пропускаем")
     await _ask_description(callback.message, state)
     await callback.answer()
 
@@ -230,7 +266,7 @@ async def process_occupation_skip(callback: CallbackQuery, state: FSMContext) ->
 async def _ask_description(message: Message, state: FSMContext) -> None:
     await state.set_state(ProfileForm.description)
     await message.answer(
-        "Расскажи немного о себе (необязательно):",
+        "📝 Расскажи немного о себе (необязательно):",
         reply_markup=skip_kb("description"),
     )
 
@@ -250,7 +286,7 @@ async def process_description_text(
 async def process_description_skip(
     callback: CallbackQuery, state: FSMContext, session_factory: async_sessionmaker
 ) -> None:
-    await callback.message.edit_text("Ок, пропускаем")
+    await callback.message.edit_text("⏭ Ок, пропускаем")
     await _finish_profile(callback.message, state, session_factory, description=None)
     await callback.answer()
 
@@ -292,7 +328,7 @@ async def _finish_profile(
 
     await state.clear()
     await message.answer(
-        "Анкета готова ✅\n\n" + summary,
+        "✅ Анкета готова!\n\n" + summary,
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )

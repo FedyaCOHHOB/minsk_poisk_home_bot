@@ -7,20 +7,38 @@ def gender_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Девушка", callback_data="gender:female"),
-                InlineKeyboardButton(text="Мужчина", callback_data="gender:male"),
+                InlineKeyboardButton(text="👩 Девушка", callback_data="gender:female"),
+                InlineKeyboardButton(text="👨 Мужчина", callback_data="gender:male"),
             ]
         ]
     )
 
 
 def housing_type_kb() -> InlineKeyboardMarkup:
+    """Верхний уровень выбора — ровно как на Kufar: там реально только
+    две категории объявлений, «Комнаты» и «Квартиры» (см. докстринг
+    sources/kufar.py). Если выбрана «Комната» — это ещё не финальный
+    ответ, а переход к уточняющему шагу (см. room_type_kb ниже), чтобы
+    не мешать в одну кучу два разных вопроса («что за жильё» и «своя
+    комната или с подселением»)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Комната", callback_data="housing:room")],
-            [InlineKeyboardButton(text="Подселение", callback_data="housing:sublet")],
-            [InlineKeyboardButton(text="Квартира", callback_data="housing:apartment")],
-            [InlineKeyboardButton(text="Неважно", callback_data="housing:any")],
+            [InlineKeyboardButton(text="🏢 Квартиру целиком", callback_data="housing:apartment")],
+            [InlineKeyboardButton(text="🚪 Комнату", callback_data="housing:room")],
+            [InlineKeyboardButton(text="🤷 Неважно", callback_data="housing:any")],
+        ]
+    )
+
+
+def room_type_kb() -> InlineKeyboardMarkup:
+    """Уточнение ПОСЛЕ того как на верхнем уровне выбрали «Комната» —
+    Kufar их структурно не различает (одна и та же категория объявлений),
+    но для человека разница принципиальная: своя комната целиком или
+    подселение/койко-место к кому-то ещё."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛏 Своя комната", callback_data="roomtype:room")],
+            [InlineKeyboardButton(text="👥 Подселение / койко-место", callback_data="roomtype:sublet")],
         ]
     )
 
@@ -28,10 +46,10 @@ def housing_type_kb() -> InlineKeyboardMarkup:
 def roommate_gender_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="К девушке", callback_data="roommate:female")],
-            [InlineKeyboardButton(text="К парню", callback_data="roommate:male")],
-            [InlineKeyboardButton(text="К паре", callback_data="roommate:couple")],
-            [InlineKeyboardButton(text="Неважно", callback_data="roommate:any")],
+            [InlineKeyboardButton(text="👩 К девушке", callback_data="roommate:female")],
+            [InlineKeyboardButton(text="👨 К парню", callback_data="roommate:male")],
+            [InlineKeyboardButton(text="💑 К паре", callback_data="roommate:couple")],
+            [InlineKeyboardButton(text="🤷 Неважно", callback_data="roommate:any")],
         ]
     )
 
@@ -40,8 +58,8 @@ def yes_no_kb(field: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Да", callback_data=f"yesno:{field}:yes"),
-                InlineKeyboardButton(text="Нет", callback_data=f"yesno:{field}:no"),
+                InlineKeyboardButton(text="✅ Да", callback_data=f"yesno:{field}:yes"),
+                InlineKeyboardButton(text="🚫 Нет", callback_data=f"yesno:{field}:no"),
             ]
         ]
     )
@@ -50,7 +68,7 @@ def yes_no_kb(field: str) -> InlineKeyboardMarkup:
 def skip_kb(field: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Пропустить", callback_data=f"skip:{field}")]
+            [InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"skip:{field}")]
         ]
     )
 
@@ -63,7 +81,7 @@ def districts_kb(selected: set[District]) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(
-                text=f"{any_mark}Любой район", callback_data="district:toggle:any"
+                text=f"{any_mark}🗺 Любой район", callback_data="district:toggle:any"
             )
         ]
     )
@@ -82,7 +100,7 @@ def districts_kb(selected: set[District]) -> InlineKeyboardMarkup:
         rows.append(row)
 
     rows.append(
-        [InlineKeyboardButton(text="Готово ➡️", callback_data="district:done")]
+        [InlineKeyboardButton(text="✅ Готово", callback_data="district:done")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
