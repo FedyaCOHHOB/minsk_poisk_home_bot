@@ -336,18 +336,36 @@ class KufarSource(BaseListingSource):
         объявлений уходило бы 30 лишних запросов к Kufar сразу, что
         противоречит принципу "не долбить сайт часто" (см. докстринг модуля).
 
-        ИСПРАВЛЕНО (реальный найденный баг, подтверждён живым прогоном
+        ИСПРАВЛЕНО (реальный найденный баг №1, подтверждён живым прогоном
         пользователя, не догадкой): раньше фильтр собирал картинки с домена
         content.kufar.by — это было верно, пока сам Kufar отдавал оттуда и
         фото объявлений тоже. Сайт сменил CDN для фото объявлений на
         rms.kufar.by, а content.kufar.by остался только под служебную
         графику (иконки, логотип, svg-калькулятор). Из-за жёсткой привязки
         к старому домену эта функция стабильно возвращала пустой список —
-        карусель фото пропадала полностью, всегда, не иногда. Теперь
-        наоборот: исключаем STATIC_ASSET_DOMAIN (это точно не фото
-        объявления) и .svg (доп. страховка на случай иконок не с этого
-        домена) — так переживёт и следующую смену CDN-поддомена, если она
-        случится, а не привяжется намертво к rms.kufar.by."""
+        карусель фото пропадала полностью, всегда, не иногда.
+
+        ИСПРАВЛЕНО (реальный найденный баг №2, тоже подтверждён живым
+        дампом разметки страницы объявления, не догадкой): после фикса
+        бага №1 функция сканировала img ПО ВСЕЙ странице объявления —
+        а внизу страницы Kufar показывает блок "Похожие объявления" теми
+        же карточками, что и на странице поиска (тот же styles_image__ZPJzx
+        внутри styles_container__Un__X). Для одного реального объявления
+        живой прогон нашёл 19 картинок, проходящих старый фильтр (не
+        content.kufar.by, не svg) — и только 2 из них были настоящими
+        фото ЭТОГО объявления (styles_gallery__slide__* / путь
+        v1/gallery/...), а 17 — превью ЧУЖИХ объявлений из блока
+        рекомендаций. Из-за этого в карусель карточки подмешивались фото
+        случайных других квартир.
+
+        Теперь сначала ищем именно контейнер(ы) галереи — по устойчивой
+        части класса "gallery__slide" (сам хэш-суффикс у Kufar плавает
+        от сборки к сборке, но эта смысловая часть класса — нет, пока
+        разметку не переделают полностью), и берём img только ВНУТРИ них.
+        Если такой контейнер не нашёлся вообще (разметка снова
+        поменялась) — осознанно возвращаем пустой список, а не откатываемся
+        на скан всей страницы: лучше показать карточку без доп. фото, чем
+        снова показать чужую квартиру под видом этой."""
         async with httpx.AsyncClient(
             headers=DEFAULT_HEADERS, timeout=self.timeout, follow_redirects=True
         ) as client:
@@ -355,19 +373,22 @@ class KufarSource(BaseListingSource):
         if html is None:
             return []
         soup = BeautifulSoup(html, "lxml")
+
+        gallery_containers = soup.select('[class*="gallery__slide"]')
         urls: list[str] = []
-        for img in soup.find_all("img"):
-            src = img.get("src") or img.get("data-src")
-            if not src:
-                continue
-            if STATIC_ASSET_DOMAIN in src:
-                continue  # иконки/лого сайта — точно не фото объявления
-            if src.lower().endswith(".svg"):
-                continue  # доп. страховка на случай svg не с content.kufar.by
-            if src not in urls:
-                urls.append(src)
-            if len(urls) >= limit:
-                break
+        for container in gallery_containers:
+            for img in container.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if not src:
+                    continue
+                if STATIC_ASSET_DOMAIN in src:
+                    continue  # иконки/лого сайта — точно не фото объявления
+                if src.lower().endswith(".svg"):
+                    continue  # доп. страховка на случай svg не с content.kufar.by
+                if src not in urls:
+                    urls.append(src)
+                if len(urls) >= limit:
+                    return urls
         return urls
 
     async def download_photos(self, urls: list[str]) -> list[bytes]:
